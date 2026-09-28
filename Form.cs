@@ -260,18 +260,24 @@ namespace MiniTC
             toolBar.Items.Add(new ToolStripButton("<", null, (s, e) => SyncPanel(true)) { ToolTipText = "Levi = Desni" });
             toolBar.Items.Add(new ToolStripButton(">", null, (s, e) => SyncPanel(false)) { ToolTipText = "Desni = Levi" });
             toolBar.Items.Add(new ToolStripSeparator());
-            toolBar.Items.Add(new ToolStripButton("F4 Edit", null, (s, e) => OpenInNotepad()));
-            toolBar.Items.Add(new ToolStripButton("F5 Copy", null, (s, e) => CopySelected()));
-            toolBar.Items.Add(new ToolStripButton("F6 Move", null, (s, e) => MoveSelected()));
-            toolBar.Items.Add(new ToolStripButton("F7 New dir", null, (s, e) => CreateFolder()));
-            toolBar.Items.Add(new ToolStripButton("F8 Path", null, (s, e) => CopyPathToClipboard()));
-            //toolBar.Items.Add(new ToolStripButton("Del Recycle", null, (s, e) => DeleteSelected(false)));
-            //toolBar.Items.Add(new ToolStripButton("Shift+Del", null, (s, e) => DeleteSelected(true)));
+            toolBar.Items.Add(new ToolStripButton("F4 Notepad", null, (s, e) => OpenInNotepad()));
+            toolBar.Items.Add(new ToolStripButton("F5 Kopiraj", null, (s, e) => CopySelected()));
+            toolBar.Items.Add(new ToolStripButton("F6 Premesti", null, (s, e) => MoveSelected()));
+            toolBar.Items.Add(new ToolStripButton("F7 Novi Dir", null, (s, e) => CreateFolder()));
+            toolBar.Items.Add(new ToolStripButton("F8 Putanja", null, (s, e) => CopyPathToClipboard()));
+            toolBar.Items.Add(new ToolStripButton("Del Recycle", null, (s, e) => DeleteSelected(false)));
+            toolBar.Items.Add(new ToolStripButton("Shift+Del", null, (s, e) => DeleteSelected(true)));
             toolBar.Items.Add(new ToolStripSeparator());
             toolBar.Items.Add(new ToolStripButton("Alt+F7 Search", null, (s, e) => OpenSearchDialog()) { ToolTipText = "Pretraga fajlova - Alt+F7" });
-            toolBar.Items.Add(new ToolStripSeparator());
             toolBar.Items.Add(new ToolStripButton("F3 Compare", null, (s, e) => RunCompareTool()) { ToolTipText = "Uporedi 2 fajla (1 levo + 1 desno obelezen) - F3" });
+            toolBar.Items.Add(new ToolStripButton("Compare Setup", null, (s, e) => SetupCompareTool()));
+            toolBar.Items.Add(new ToolStripSeparator());
+            toolBar.Items.Add(new ToolStripButton("Ctrl+T Tab", null, (s, e) => NewTab()));
+            toolBar.Items.Add(new ToolStripButton("Ctrl+W Close", null, (s, e) => CloseTab()));
+            toolBar.Items.Add(new ToolStripButton("Ctrl+Tab Next", null, (s, e) => NextTab()));
+            toolBar.Items.Add(new ToolStripSeparator());
             toolBar.Items.Add(new ToolStripLabel(" Font:"));
+
             fontCombo = new ToolStripComboBox
             {
                 Items = { "10", "12", "14", "16", "18", "20", "22", "26", "32" },
@@ -281,11 +287,6 @@ namespace MiniTC
             fontCombo.SelectedIndexChanged += (s, e) => ChangeFont();
             toolBar.Items.Add(fontCombo);
             toolBar.Items.Add(new ToolStripSeparator());
-            toolBar.Items.Add(new ToolStripButton("Compare Setup", null, (s, e) => SetupCompareTool()));
-            toolBar.Items.Add(new ToolStripSeparator());
-            //toolBar.Items.Add(new ToolStripButton("Ctrl+T Tab", null, (s, e) => NewTab()));
-            //toolBar.Items.Add(new ToolStripButton("Ctrl+W Close", null, (s, e) => CloseTab()));
-            //toolBar.Items.Add(new ToolStripButton("Ctrl+Tab Next", null, (s, e) => NextTab()));
 
             var shellToggle = new ToolStripButton("Shell OFF") { CheckOnClick = true, Checked = false };
             shellToggle.CheckedChanged += (s, e) =>
@@ -906,6 +907,24 @@ namespace MiniTC
                 return true;
             }
 
+            if (keyData == (Keys.Control | Keys.C))
+            {
+                ClipboardCopyFiles();
+                return true;
+            }
+
+            if (keyData == (Keys.Control | Keys.V))
+            {
+                ClipboardPasteFiles();
+                return true;
+            }
+
+            if (keyData == (Keys.Control | Keys.X))
+            {
+                ClipboardCutFiles();
+                return true;
+            }
+
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
@@ -1441,7 +1460,18 @@ namespace MiniTC
             }
 
             if (e.Control && e.KeyCode == Keys.C)
-                CopyPathToClipboard();
+            {
+                ClipboardCopyFiles();
+                e.Handled = true;
+                return;
+            }
+
+            if (e.Control && e.KeyCode == Keys.V)
+            {
+                ClipboardPasteFiles();
+                e.Handled = true;
+                return;
+            }
         }
 
         private void JumpToFirst(char c)
@@ -1894,6 +1924,9 @@ btnBrowse.Click += (s, e) =>
             }
         }
 
+
+
+
         // ========== 6. ALT+F7 SEARCH - FULL VERZIJA ==========
         private void OpenSearchDialog()
         {
@@ -1958,7 +1991,6 @@ btnBrowse.Click += (s, e) =>
                 Height = 600,
                 Text = "Rezultati pretrage za '" + pattern + "' u " + root + " - DblClick/Enter locira fajl",
                 StartPosition = FormStartPosition.CenterParent,
-                WindowState = FormWindowState.Maximized,
                 MinimizeBox = false,
                 MaximizeBox = true
             };
@@ -2168,6 +2200,267 @@ btnBrowse.Click += (s, e) =>
             return (bytes / (1024 * 1024)) + " MB";
         }
 
+
+        // ========== 7. CTRL+C / CTRL+V / CTRL+X - Clipboard kao Explorer ==========
+        private List<string> _clipboardCutList = null; // ako je Cut, pamtimo da posle Paste obrisemo
+        private bool _isCutOperation = false;
+
+        private List<string> GetFilesToClipboard()
+        {
+            List<string> toCopy;
+            if (ActiveMarked.Count > 0)
+                toCopy = ActiveMarked.ToList();
+            else
+            {
+                if (ActiveList.SelectedItems.Count == 0) return new List<string>();
+                var sel = ActiveList.SelectedItems[0].Tag as string;
+                if (string.IsNullOrEmpty(sel) || sel.EndsWith("..")) return new List<string>();
+                toCopy = new List<string> { sel };
+            }
+            return toCopy;
+        }
+
+        private void ClipboardCopyFiles()
+        {
+            var files = GetFilesToClipboard();
+            if (files.Count == 0) return;
+
+            try
+            {
+                // Mora u STA threadu - isto kao i za OpenFileDialog
+                var t = new Thread(() =>
+                {
+                    try
+                    {
+                        var sc = new System.Collections.Specialized.StringCollection();
+                        foreach (var f in files) sc.Add(f);
+                        Clipboard.Clear();
+                        Clipboard.SetFileDropList(sc);
+                        // Oznaci kao Copy operaciju (4 = Copy)
+                        try
+                        {
+                            var data = new DataObject();
+                            data.SetFileDropList(sc);
+                            byte[] moveEffect = new byte[] { 5, 0, 0, 0 }; // 2 = Move, 5 = Copy
+                            // Copy
+                            var ms = new MemoryStream(new byte[] { 5, 0, 0, 0 });
+                            data.SetData("Preferred DropEffect", ms);
+                            Clipboard.SetDataObject(data, true);
+                        }
+                        catch { }
+                    }
+                    catch { }
+                });
+                t.SetApartmentState(ApartmentState.STA);
+                t.Start();
+                t.Join();
+
+                _isCutOperation = false;
+                _clipboardCutList = null;
+                // FIX: obriši markirano da ne kopira opet isto
+                ActiveMarked.Clear();
+                ActiveList.Invalidate();
+                UpdateStatus();
+                statusLabel.Text = " Clipboard COPY: " + files.Count + " stavki | Ctrl+V za paste u " + (ActiveList == leftList ? leftCurrent : rightCurrent);
+                lastStatus = statusLabel.Text;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Clipboard Copy greška: " + ex.Message);
+            }
+        }
+
+        private void ClipboardCutFiles()
+        {
+            var files = GetFilesToClipboard();
+            if (files.Count == 0) return;
+
+            try
+            {
+                var t = new Thread(() =>
+                {
+                    try
+                    {
+                        var sc = new System.Collections.Specialized.StringCollection();
+                        foreach (var f in files) sc.Add(f);
+                        Clipboard.Clear();
+                        // Za Cut stavljamo DropEffect = Move (2)
+                        var data = new DataObject();
+                        data.SetFileDropList(sc);
+                        var ms = new MemoryStream(new byte[] { 2, 0, 0, 0 }); // 2 = Move
+                        data.SetData("Preferred DropEffect", ms);
+                        Clipboard.SetDataObject(data, true);
+                    }
+                    catch { }
+                });
+                t.SetApartmentState(ApartmentState.STA);
+                t.Start();
+                t.Join();
+
+                _isCutOperation = true;
+                _clipboardCutList = files.ToList();
+                // FIX: obriši markirano da ne secka opet isto
+                ActiveMarked.Clear();
+                ActiveList.Invalidate();
+                UpdateStatus();
+                statusLabel.Text = " Clipboard CUT: " + files.Count + " stavki | Ctrl+V za premestanje u " + (ActiveList == leftList ? leftCurrent : rightCurrent);
+                lastStatus = statusLabel.Text;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Clipboard Cut greška: " + ex.Message);
+            }
+        }
+
+        private async void ClipboardPasteFiles()
+        {
+            try
+            {
+                System.Collections.Specialized.StringCollection fileList = null;
+                bool isMove = _isCutOperation;
+
+                // Uzmi fajlove iz clipboard-a - radi i za fajlove kopirane iz Win Explorera
+                var t = new Thread(() =>
+                {
+                    try
+                    {
+                        if (Clipboard.ContainsFileDropList())
+                        {
+                            fileList = Clipboard.GetFileDropList();
+                            // Proveri da li je Cut ili Copy
+                            try
+                            {
+                                var data = Clipboard.GetDataObject();
+                                if (data != null && data.GetDataPresent("Preferred DropEffect"))
+                                {
+                                    var stream = data.GetData("Preferred DropEffect") as MemoryStream;
+                                    if (stream != null)
+                                    {
+                                        byte[] bytes = stream.ToArray();
+                                        if (bytes.Length > 0 && bytes[0] == 2) isMove = true; // Move
+                                    }
+                                    else
+                                    {
+                                        var bytes2 = data.GetData("Preferred DropEffect") as byte[];
+                                        if (bytes2 != null && bytes2.Length > 0 && bytes2[0] == 2) isMove = true;
+                                    }
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                    catch { }
+                });
+                t.SetApartmentState(ApartmentState.STA);
+                t.Start();
+                t.Join();
+
+                if (fileList == null || fileList.Count == 0)
+                {
+                    statusLabel.Text = " Clipboard prazan - nema fajlova za paste";
+                    lastStatus = statusLabel.Text;
+                    return;
+                }
+
+                string destDir = ActiveList == leftList ? leftCurrent : rightCurrent;
+                var srcList = fileList.Cast<string>().ToList();
+
+                // ako je Cut iz naseg programa, koristi _clipboardCutList za proveru da ne pastujes u isti folder
+                if (_isCutOperation && _clipboardCutList != null && _clipboardCutList.Count == srcList.Count)
+                {
+                    // proveri da li je isti folder - ako jeste, nema sta da se radi
+                    bool sameFolder = srcList.All(s => Path.GetDirectoryName(s).Equals(destDir, StringComparison.OrdinalIgnoreCase));
+                    if (sameFolder)
+                    {
+                        statusLabel.Text = " Vec si u istom folderu, nema potrebe za Move";
+                        lastStatus = statusLabel.Text;
+                        return;
+                    }
+                }
+
+                string opName = isMove ? "Premestiti" : "Kopirati";
+                if (MessageBox.Show(opName + " " + srcList.Count + " stavki iz clipboard-a u\n" + destDir + "?", "Ctrl+V " + opName, MessageBoxButtons.YesNo) != DialogResult.Yes)
+                    return;
+
+                int okCount = 0;
+                foreach (var src in srcList)
+                {
+                    if (!File.Exists(src) && !Directory.Exists(src)) continue;
+                    try
+                    {
+                        string dest = Path.Combine(destDir, Path.GetFileName(src));
+
+                        // izbegni kopiranje samog sebe
+                        if (string.Equals(src, dest, StringComparison.OrdinalIgnoreCase)) continue;
+
+                        if (File.Exists(src))
+                        {
+                            if (File.Exists(dest))
+                            {
+                                var r = MessageBox.Show("Fajl već postoji:\n" + dest + "\nPregaziti?", "Ctrl+V", MessageBoxButtons.YesNoCancel);
+                                if (r == DialogResult.Cancel) break;
+                                if (r != DialogResult.Yes) continue;
+                                File.Delete(dest);
+                            }
+                            if (isMove)
+                                await Task.Run(() => File.Move(src, dest));
+                            else
+                                await Task.Run(() => File.Copy(src, dest, true));
+                            okCount++;
+                        }
+                        else if (Directory.Exists(src))
+                        {
+                            if (Directory.Exists(dest))
+                            {
+                                var r = MessageBox.Show("Folder već postoji:\n" + dest + "\nSpojiti/pregaziti sadržaj?", "Ctrl+V", MessageBoxButtons.YesNoCancel);
+                                if (r == DialogResult.Cancel) break;
+                                if (r != DialogResult.Yes) continue;
+                            }
+                            if (isMove)
+                                await Task.Run(() => MoveDirectory(src, dest));
+                            else
+                                await Task.Run(() => CopyDirectory(src, dest));
+                            okCount++;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show("Greška pri " + opName.ToLower() + " " + src + ": " + ex.Message);
+                    }
+                }
+
+                LoadFolder(leftList, leftPath, leftCurrent, null);
+                LoadFolder(rightList, rightPath, rightCurrent, null);
+                ActiveMarked.Clear();
+                UpdateStatus();
+
+                if (okCount > 0)
+                {
+                    // FIX: ocisti clipboard nakon i Copy i Move da ne pamti i ne kopira opet isto - kao sto si trazio
+                    try
+                    {
+                        var clearThread = new Thread(() => { try { Clipboard.Clear(); } catch { } });
+                        clearThread.SetApartmentState(ApartmentState.STA);
+                        clearThread.Start();
+                        clearThread.Join();
+                    }
+                    catch { }
+                    _isCutOperation = false;
+                    _clipboardCutList = null;
+                    ActiveMarked.Clear();
+                    ActiveList.Invalidate();
+                }
+
+                statusLabel.Text = " " + opName + " završeno: " + okCount + "/" + srcList.Count + " u " + destDir;
+                lastStatus = statusLabel.Text;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Clipboard Paste greška: " + ex.Message);
+            }
+        }
+
+
         private void DeleteSelected(bool permanent)
         {
             List<string> toDel;
@@ -2231,5 +2524,4 @@ btnBrowse.Click += (s, e) =>
             LoadFolder(ActiveList, ActiveList == leftList ? leftPath : rightPath, ActiveList == leftList ? leftCurrent : rightCurrent, null);
         }
     }
-
 }
