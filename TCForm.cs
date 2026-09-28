@@ -10,6 +10,7 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Drawing;
 using System.Text.RegularExpressions;
+using System.Collections.Concurrent;
 
 namespace MiniTC
 {
@@ -95,10 +96,85 @@ namespace MiniTC
 
     public class MiniCommander : Form
     {
+        // ---- ikonice fajlova/foldera (kao u TC), izvuce ih iz sistema po ekstenziji ----
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SHFILEINFO
+        {
+            public IntPtr hIcon;
+            public int iIcon;
+            public uint dwAttributes;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szDisplayName;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 80)] public string szTypeName;
+        }
+
+        [DllImport("shell32.dll", CharSet = CharSet.Auto)]
+        private static extern IntPtr SHGetFileInfo(string pszPath, uint dwFileAttributes, ref SHFILEINFO psfi, uint cbFileInfo, uint uFlags);
+
+        [DllImport("user32.dll")]
+        private static extern bool DestroyIcon(IntPtr hIcon);
+
+        private const uint FILE_ATTRIBUTE_NORMAL = 0x80;
+        private const uint FILE_ATTRIBUTE_DIRECTORY = 0x10;
+        private const uint SHGFI_ICON = 0x100;
+        private const uint SHGFI_SMALLICON = 0x1;
+        private const uint SHGFI_USEFILEATTRIBUTES = 0x10;
+
+        private static readonly ConcurrentDictionary<string, Image> iconCache = new ConcurrentDictionary<string, Image>(StringComparer.OrdinalIgnoreCase);
+
+        // Uzima generičku ikonicu za ekstenziju/folder direktno iz sistema (bez čitanja pravog fajla - brzo je).
+        private static Image GetIconFor(string nameOrPath, bool isDir)
+        {
+            string key = isDir ? "\folder" : Path.GetExtension(nameOrPath).ToLowerInvariant();
+            if (string.IsNullOrEmpty(key) && !isDir) key = "\noext";
+
+            Image img;
+            if (iconCache.TryGetValue(key, out img)) return img;
+
+            var shfi = new SHFILEINFO();
+            uint attr = isDir ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+            string dummy = isDir ? "folder" : ("file" + key);
+            IntPtr res = SHGetFileInfo(dummy, attr, ref shfi, (uint)Marshal.SizeOf(shfi), SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+            if (res != IntPtr.Zero && shfi.hIcon != IntPtr.Zero)
+            {
+                try { img = Icon.FromHandle(shfi.hIcon).ToBitmap(); }
+                catch { img = null; }
+                finally { DestroyIcon(shfi.hIcon); }
+            }
+            iconCache[key] = img;
+            return img;
+        }
+
         // ========== PUTANJA ZA CONFIG - PROMENI OVDE AKO TREBA ==========
         // Sada je TXT da ne treba System.Xml.dll
         private const string ConfigFilePath = @"C:\MiniTC\MiniTC.txt";
         // ================================================================
+
+        // ========== BOJE - PROMENI OVDE AKO TREBA ==========
+        private static readonly Color ColorBg = Color.FromArgb(30, 30, 30);//(20, 15, 15);         // pozadina panela/liste
+        private static readonly Color ColorFg = Color.White;                 // obicno slovo u listi
+        private static readonly Color ColorAccent = Color.Cyan;              // path box, drive combo, header slova
+        private static readonly Color ColorToolbarBg = Color.FromArgb(30, 30, 30);
+        private static readonly Color ColorToolbarFg = Color.White;
+        private static readonly Color ColorSplitter = Color.DimGray;
+        private static readonly Color ColorTabBg = Color.FromArgb(20, 20, 20);
+        private static readonly Color ColorCmdBg = Color.Black;
+        private static readonly Color ColorCmdFg = Color.Yellow;
+        private static readonly Color ColorStatusFg = Color.Lime;
+        private static readonly Color ColorTabActiveBg = Color.Yellow;
+        private static readonly Color ColorTabActiveFg = Color.Black;
+        private static readonly Color ColorTabInactiveBg = Color.FromArgb(50, 50, 50);
+        private static readonly Color ColorTabInactiveFg = Color.White;
+        private static readonly Color ColorHeaderBg = Color.FromArgb(55, 55, 55);
+        private static readonly Color ColorHeaderFg = Color.Cyan;
+        private static readonly Color ColorSelBg = Color.White;              // pozadina fokusirane stavke
+        private static readonly Color ColorSelFg = Color.Black;              // slovo fokusirane stavke
+        private static readonly Color ColorMarkedFg = Color.Red;             // slovo obelezenog (markiranog) fajla
+        private static readonly Color ColorShellOnBg = Color.DarkGreen;
+        private static readonly Color ColorHintFg = Color.Gray;
+        private static readonly Color ColorGotoBtnBg = Color.Yellow;
+        private static readonly Color ColorDeletePermanentBg = Color.Red;
+        private static readonly Color ColorDeleteRecycleBg = Color.Orange;
+        // =====================================================
 
         private ListView leftList, rightList;
         private ComboBox leftDrive, rightDrive;
@@ -121,7 +197,7 @@ namespace MiniTC
         private string leftCurrent = @"C:\";
         private string rightCurrent = @"C:\";
 
-        private Font listFont = new Font("Consolas", 14f);
+        private Font listFont = new Font("Consolas", 14f); //("Calibri", 14f); //
 
         private HashSet<string> markedLeft = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private HashSet<string> markedRight = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -246,15 +322,15 @@ namespace MiniTC
             Height = 800;
             WindowState = FormWindowState.Maximized;
             KeyPreview = true;
-            BackColor = Color.Black;
+            BackColor = ColorBg;
             DoubleBuffered = true;
 
             toolBar = new ToolStrip
             {
                 Dock = DockStyle.Top,
                 GripStyle = ToolStripGripStyle.Hidden,
-                BackColor = Color.FromArgb(30, 30, 30),
-                ForeColor = Color.White
+                BackColor = ColorToolbarBg,
+                ForeColor = ColorToolbarFg
             };
 
             toolBar.Items.Add(new ToolStripButton("<", null, (s, e) => SyncPanel(true)) { ToolTipText = "Levi = Desni" });
@@ -265,8 +341,8 @@ namespace MiniTC
             toolBar.Items.Add(new ToolStripButton("F6 Premesti", null, (s, e) => MoveSelected()));
             toolBar.Items.Add(new ToolStripButton("F7 Novi Dir", null, (s, e) => CreateFolder()));
             toolBar.Items.Add(new ToolStripButton("F8 Putanja", null, (s, e) => CopyPathToClipboard()));
-            toolBar.Items.Add(new ToolStripButton("Del Recycle", null, (s, e) => DeleteSelected(false)));
-            toolBar.Items.Add(new ToolStripButton("Shift+Del", null, (s, e) => DeleteSelected(true)));
+            //toolBar.Items.Add(new ToolStripButton("Del Recycle", null, (s, e) => DeleteSelected(false)));
+            //toolBar.Items.Add(new ToolStripButton("Shift+Del", null, (s, e) => DeleteSelected(true)));
             toolBar.Items.Add(new ToolStripSeparator());
             toolBar.Items.Add(new ToolStripButton("Alt+F7 Search", null, (s, e) => OpenSearchDialog()) { ToolTipText = "Pretraga fajlova - Alt+F7" });
             toolBar.Items.Add(new ToolStripButton("F3 Compare", null, (s, e) => RunCompareTool()) { ToolTipText = "Uporedi 2 fajla (1 levo + 1 desno obelezen) - F3" });
@@ -293,7 +369,7 @@ namespace MiniTC
             {
                 useRealShellMenu = shellToggle.Checked;
                 shellToggle.Text = useRealShellMenu ? "Shell ON" : "Shell OFF";
-                shellToggle.BackColor = useRealShellMenu ? Color.DarkGreen : Color.FromArgb(30, 30, 30);
+                shellToggle.BackColor = useRealShellMenu ? ColorShellOnBg : ColorToolbarBg;
             };
             toolBar.Items.Add(shellToggle);
 
@@ -301,18 +377,18 @@ namespace MiniTC
             {
                 Dock = DockStyle.Fill,
                 SplitterDistance = 600,
-                BackColor = Color.DimGray,
+                BackColor = ColorSplitter,
                 BorderStyle = BorderStyle.None,
                 Panel1MinSize = 100,
                 Panel2MinSize = 100,
                 SplitterWidth = 6
             };
 
-            leftDrive = new ComboBox { Dock = DockStyle.Top, DropDownStyle = ComboBoxStyle.DropDownList, TabStop = false, BackColor = Color.Black, ForeColor = Color.Cyan, FlatStyle = FlatStyle.Flat };
-            rightDrive = new ComboBox { Dock = DockStyle.Top, DropDownStyle = ComboBoxStyle.DropDownList, TabStop = false, BackColor = Color.Black, ForeColor = Color.Cyan, FlatStyle = FlatStyle.Flat };
+            leftDrive = new ComboBox { Dock = DockStyle.Top, DropDownStyle = ComboBoxStyle.DropDownList, TabStop = false, BackColor = ColorBg, ForeColor = ColorAccent, FlatStyle = FlatStyle.Flat };
+            rightDrive = new ComboBox { Dock = DockStyle.Top, DropDownStyle = ComboBoxStyle.DropDownList, TabStop = false, BackColor = ColorBg, ForeColor = ColorAccent, FlatStyle = FlatStyle.Flat };
 
-            leftPath = new TextBox { Dock = DockStyle.Top, BackColor = Color.Black, ForeColor = Color.Cyan, BorderStyle = BorderStyle.FixedSingle };
-            rightPath = new TextBox { Dock = DockStyle.Top, BackColor = Color.Black, ForeColor = Color.Cyan, BorderStyle = BorderStyle.FixedSingle };
+            leftPath = new TextBox { Dock = DockStyle.Top, BackColor = ColorBg, ForeColor = ColorAccent, BorderStyle = BorderStyle.FixedSingle };
+            rightPath = new TextBox { Dock = DockStyle.Top, BackColor = ColorBg, ForeColor = ColorAccent, BorderStyle = BorderStyle.FixedSingle };
 
             leftPath.KeyDown += PathBox_KeyDown;
             rightPath.KeyDown += PathBox_KeyDown;
@@ -321,7 +397,7 @@ namespace MiniTC
             {
                 Dock = DockStyle.Top,
                 Height = 30,
-                BackColor = Color.FromArgb(20, 20, 20),
+                BackColor = ColorTabBg,
                 WrapContents = false,
                 AutoScroll = true
             };
@@ -330,7 +406,7 @@ namespace MiniTC
             {
                 Dock = DockStyle.Top,
                 Height = 30,
-                BackColor = Color.FromArgb(20, 20, 20),
+                BackColor = ColorTabBg,
                 WrapContents = false,
                 AutoScroll = true
             };
@@ -338,13 +414,13 @@ namespace MiniTC
             leftList = CreateFileList();
             rightList = CreateFileList();
 
-            var leftPanel = new Panel { Dock = DockStyle.Fill, BackColor = Color.Black };
+            var leftPanel = new Panel { Dock = DockStyle.Fill, BackColor = ColorBg };
             leftPanel.Controls.Add(leftList);
             leftPanel.Controls.Add(leftPath);
             leftPanel.Controls.Add(leftDrive);
             leftPanel.Controls.Add(leftTabPanel);
 
-            var rightPanel = new Panel { Dock = DockStyle.Fill, BackColor = Color.Black };
+            var rightPanel = new Panel { Dock = DockStyle.Fill, BackColor = ColorBg };
             rightPanel.Controls.Add(rightList);
             rightPanel.Controls.Add(rightPath);
             rightPanel.Controls.Add(rightDrive);
@@ -357,15 +433,15 @@ namespace MiniTC
             {
                 Dock = DockStyle.Bottom,
                 Height = 26,
-                BackColor = Color.Black,
-                ForeColor = Color.Yellow,
+                BackColor = ColorCmdBg,
+                ForeColor = ColorCmdFg,
                 BorderStyle = BorderStyle.FixedSingle,
                 Font = listFont
             };
             cmdBox.KeyDown += CmdBox_KeyDown;
 
-            var cmdLine = new Label { Dock = DockStyle.Bottom, Height = 2, BackColor = Color.DimGray };
-            statusLabel = new Label { Dock = DockStyle.Bottom, Height = 28, BackColor = Color.Black, ForeColor = Color.Lime };
+            var cmdLine = new Label { Dock = DockStyle.Bottom, Height = 2, BackColor = ColorSplitter };
+            statusLabel = new Label { Dock = DockStyle.Bottom, Height = 28, BackColor = ColorBg, ForeColor = ColorStatusFg };
 
             EnableDoubleBuffer(statusLabel);
             EnableDoubleBuffer(cmdBox);
@@ -561,8 +637,8 @@ namespace MiniTC
                     Text = (i + 1) + ":" + name,
                     Height = 24,
                     AutoSize = true,
-                    BackColor = i == leftTabIdx ? Color.Yellow : Color.FromArgb(50, 50, 50),
-                    ForeColor = i == leftTabIdx ? Color.Black : Color.White,
+                    BackColor = i == leftTabIdx ? ColorTabActiveBg : ColorTabInactiveBg,
+                    ForeColor = i == leftTabIdx ? ColorTabActiveFg : ColorTabInactiveFg,
                     FlatStyle = FlatStyle.Flat,
                     Margin = new Padding(1)
                 };
@@ -587,8 +663,8 @@ namespace MiniTC
                     Text = (i + 1) + ":" + name,
                     Height = 24,
                     AutoSize = true,
-                    BackColor = i == rightTabIdx ? Color.Yellow : Color.FromArgb(50, 50, 50),
-                    ForeColor = i == rightTabIdx ? Color.Black : Color.White,
+                    BackColor = i == rightTabIdx ? ColorTabActiveBg : ColorTabInactiveBg,
+                    ForeColor = i == rightTabIdx ? ColorTabActiveFg : ColorTabInactiveFg,
                     FlatStyle = FlatStyle.Flat,
                     Margin = new Padding(1)
                 };
@@ -678,6 +754,53 @@ namespace MiniTC
             }
         }
 
+        // "cd" komanda: cd\ ide na root diska, cd .. jedan direktorijum nazad, cd "ime foldera" ili
+        // cd C:\puna\putanja ide na taj folder (ime foldera se trazi relativno na trenutni folder panela).
+        private bool TryHandleCd(string cmd, string activeCur, ListView list, TextBox pathBox)
+        {
+            if (!cmd.StartsWith("cd", StringComparison.OrdinalIgnoreCase)) return false;
+            if (cmd.Length > 2 && char.IsLetterOrDigit(cmd[2])) return false;   // npr. "cdrom" nije "cd"
+
+            string arg = cmd.Length > 2 ? cmd.Substring(2).Trim() : "";
+            if (arg.Length >= 2 && arg[0] == '"' && arg[arg.Length - 1] == '"') arg = arg.Substring(1, arg.Length - 2);
+
+            string target;
+            if (arg.Length == 0)
+            {
+                target = activeCur;   // samo "cd" - ostani gde jesi
+            }
+            else if (arg == "\\" || arg == @"/")
+            {
+                target = Path.GetPathRoot(activeCur);   // cd\ -> root trenutnog diska
+            }
+            else if (arg == "..")
+            {
+                var parent = Directory.GetParent(activeCur);
+                target = parent != null ? parent.FullName : activeCur;
+            }
+            else if (arg.Length >= 2 && arg[1] == ':')
+            {
+                target = arg.Length == 2 ? arg + "\\" : arg;   // npr. cd D: ili cd D:\Data
+            }
+            else
+            {
+                try { target = Path.GetFullPath(Path.Combine(activeCur, arg)); }
+                catch { target = arg; }
+            }
+
+            if (!Directory.Exists(target))
+            {
+                statusLabel.Text = " Ne postoji folder: " + target;
+                lastStatus = statusLabel.Text;
+                cmdBox.Clear();
+                return true;
+            }
+
+            LoadFolder(list, pathBox, target, activeCur);
+            cmdBox.Clear();
+            return true;
+        }
+
         private void CmdBox_KeyDown(object sender, KeyEventArgs e)
         {
             if (e.KeyCode != Keys.Enter) return;
@@ -686,24 +809,45 @@ namespace MiniTC
             if (string.IsNullOrWhiteSpace(cmd)) return;
 
             string activeCur = ActiveList == leftList ? leftCurrent : rightCurrent;
+            var activePath = ActiveList == leftList ? leftPath : rightPath;
 
             try
             {
                 if (cmd.Length == 2 && cmd[1] == ':') cmd += "\\";
 
+                if (TryHandleCd(cmd, activeCur, ActiveList, activePath))
+                {
+                    e.SuppressKeyPress = true;
+                    return;
+                }
+
                 if (Directory.Exists(cmd))
                 {
-                    LoadFolder(ActiveList, ActiveList == leftList ? leftPath : rightPath, cmd, null);
+                    LoadFolder(ActiveList, activePath, cmd, null);
                     cmdBox.Clear();
                     e.SuppressKeyPress = true;
                     return;
+                }
+
+                // ime foldera bez "cd" ispred, relativno na trenutni folder panela (npr. samo "Downloads")
+                if (cmd.IndexOfAny(Path.GetInvalidPathChars()) < 0)
+                {
+                    string maybeDir = null;
+                    try { maybeDir = Path.GetFullPath(Path.Combine(activeCur, cmd)); } catch { }
+                    if (maybeDir != null && Directory.Exists(maybeDir))
+                    {
+                        LoadFolder(ActiveList, activePath, maybeDir, activeCur);
+                        cmdBox.Clear();
+                        e.SuppressKeyPress = true;
+                        return;
+                    }
                 }
 
                 if (cmd.Equals("..") || cmd.Equals("cd.."))
                 {
                     var parent = Directory.GetParent(activeCur);
                     if (parent != null)
-                        LoadFolder(ActiveList, ActiveList == leftList ? leftPath : rightPath, parent.FullName, activeCur);
+                        LoadFolder(ActiveList, activePath, parent.FullName, activeCur);
                     cmdBox.Clear();
                     return;
                 }
@@ -1003,8 +1147,8 @@ namespace MiniTC
                 HideSelection = false,
                 MultiSelect = false,
                 OwnerDraw = true,
-                BackColor = Color.Black,
-                ForeColor = Color.White,
+                BackColor = ColorBg,
+                ForeColor = ColorFg,
                 Font = listFont,
                 BorderStyle = BorderStyle.None
             };
@@ -1039,8 +1183,8 @@ namespace MiniTC
 
             lv.DrawColumnHeader += (s, e) =>
             {
-                e.Graphics.FillRectangle(new SolidBrush(Color.FromArgb(55, 55, 55)), e.Bounds);
-                TextRenderer.DrawText(e.Graphics, e.Header.Text, listFont, e.Bounds, Color.Cyan, TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
+                e.Graphics.FillRectangle(new SolidBrush(ColorHeaderBg), e.Bounds);
+                TextRenderer.DrawText(e.Graphics, e.Header.Text, listFont, e.Bounds, ColorHeaderFg, TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
             };
 
             lv.DrawItem += (s, e) => { e.DrawDefault = false; };
@@ -1052,14 +1196,30 @@ namespace MiniTC
                 bool isMarked = list == leftList ? markedLeft.Contains(fullPath) : markedRight.Contains(fullPath);
                 bool isFocusedItem = e.Item.Focused && list.Focused;
 
-                Color back = isFocusedItem ? Color.White : Color.Black;
-                Color fore = isMarked ? Color.Red : (isFocusedItem ? Color.Black : Color.White);
+                Color back = isFocusedItem ? ColorSelBg : ColorBg;
+                Color fore = isMarked ? ColorMarkedFg : (isFocusedItem ? ColorSelFg : ColorFg);
 
                 using (var b = new SolidBrush(back))
                     e.Graphics.FillRectangle(b, e.Bounds);
 
                 var f = isMarked ? new Font(listFont, FontStyle.Bold) : listFont;
-                e.Graphics.DrawString(e.SubItem.Text, f, new SolidBrush(fore), e.Bounds.Location);
+                var textPos = e.Bounds.Location;
+
+                if (e.ColumnIndex == 0)
+                {
+                    bool isUp = e.Item.Text == "[..]";
+                    bool isDirRow = e.Item.SubItems.Count > 1 &&
+                        (e.Item.SubItems[1].Text == "<DIR>" || e.Item.SubItems[1].Text == "<DIR UP>");
+                    Image icon = GetIconFor(isDirRow ? "" : (fullPath ?? e.Item.Text), isDirRow);
+                    if (icon != null)
+                    {
+                        int iy = e.Bounds.Top + (e.Bounds.Height - 16) / 2;
+                        e.Graphics.DrawImage(icon, e.Bounds.Left + 2, iy, 16, 16);
+                    }
+                    textPos = new Point(e.Bounds.Left + 2 + 16 + 4, e.Bounds.Top);
+                }
+
+                e.Graphics.DrawString(e.SubItem.Text, f, new SolidBrush(fore), textPos);
                 if (isMarked) f.Dispose();
             };
 
@@ -1457,6 +1617,12 @@ namespace MiniTC
                 case Keys.F8:
                     CopyPathToClipboard();
                     break;
+
+                case Keys.F1:
+                    cmdBox.Focus();
+                    cmdBox.SelectAll();
+                    e.Handled = true;
+                    break;
             }
 
             if (e.Control && e.KeyCode == Keys.C)
@@ -1792,7 +1958,7 @@ namespace MiniTC
             Label lblParams = new Label() { Left = 10, Top = 65, Width = 560, Text = "Parametri (ostavi prazno za default file1 file2 ili npr. %1 %2):" };
             TextBox txtParams = new TextBox() { Left = 10, Top = 85, Width = 560, Text = compareToolParams };
 
-            Label lblHint = new Label() { Left = 10, Top = 110, Width = 560, Height = 30, ForeColor = Color.Gray, Text = @"Primer Beyond: C:\Program Files\Beyond Compare 4\BCompare.exe | Params: prazno" };
+            Label lblHint = new Label() { Left = 10, Top = 110, Width = 560, Height = 30, ForeColor = ColorHintFg, Text = @"Primer Beyond: C:\Program Files\Beyond Compare 4\BCompare.exe | Params: prazno" };
 
             Button ok = new Button() { Text = "Sacuvaj", Left = 380, Top = 145, Width = 90, DialogResult = DialogResult.OK };
             Button cancel = new Button() { Text = "Otkaži", Left = 480, Top = 145, Width = 90, DialogResult = DialogResult.Cancel };
@@ -2002,8 +2168,8 @@ btnBrowse.Click += (s, e) =>
                 FullRowSelect = true,
                 HideSelection = false,
                 MultiSelect = false,
-                BackColor = Color.Black,
-                ForeColor = Color.White,
+                BackColor = ColorBg,
+                ForeColor = ColorFg,
                 Font = listFont
             };
             lv.Columns.Add("Ime", 250);
@@ -2011,11 +2177,11 @@ btnBrowse.Click += (s, e) =>
             lv.Columns.Add("Veličina", 80);
             lv.Columns.Add("Datum", 130);
 
-            Label lblStatus = new Label() { Dock = DockStyle.Top, Height = 24, BackColor = Color.FromArgb(30, 30, 30), ForeColor = Color.Lime, Text = " Pretraga u toku: " + root + " za '" + pattern + "'..." };
-            Label lblCount = new Label() { Dock = DockStyle.Bottom, Height = 24, BackColor = Color.FromArgb(30, 30, 30), ForeColor = Color.Cyan, Text = " Pronađeno: 0" };
+            Label lblStatus = new Label() { Dock = DockStyle.Top, Height = 24, BackColor = ColorToolbarBg, ForeColor = ColorStatusFg, Text = " Pretraga u toku: " + root + " za '" + pattern + "'..." };
+            Label lblCount = new Label() { Dock = DockStyle.Bottom, Height = 24, BackColor = ColorToolbarBg, ForeColor = ColorAccent, Text = " Pronađeno: 0" };
 
-            Panel bottomPanel = new Panel() { Dock = DockStyle.Bottom, Height = 40, BackColor = Color.FromArgb(30, 30, 30) };
-            Button btnGoto = new Button() { Text = "Idi na fajl (Enter)", Left = 10, Top = 8, Width = 140, BackColor = Color.Yellow };
+            Panel bottomPanel = new Panel() { Dock = DockStyle.Bottom, Height = 40, BackColor = ColorToolbarBg };
+            Button btnGoto = new Button() { Text = "Idi na fajl (Enter)", Left = 10, Top = 8, Width = 140, BackColor = ColorGotoBtnBg };
             Button btnOpen = new Button() { Text = "Otvori", Left = 160, Top = 8, Width = 80 };
             Button btnClose = new Button() { Text = "Zatvori (Esc)", Left = 780, Top = 8, Width = 100, DialogResult = DialogResult.Cancel };
             bottomPanel.Controls.AddRange(new Control[] { btnGoto, btnOpen, btnClose });
@@ -2490,7 +2656,7 @@ btnBrowse.Click += (s, e) =>
             ListBox lb = new ListBox() { Left = 10, Top = 50, Width = 560, Height = 270 };
             lb.Items.AddRange(toDel.ToArray());
 
-            Button ok = new Button() { Text = permanent ? "Trajno" : "Recycle", Left = 350, Top = 330, Width = 110, DialogResult = DialogResult.OK, BackColor = permanent ? Color.Red : Color.Orange };
+            Button ok = new Button() { Text = permanent ? "Trajno" : "Recycle", Left = 350, Top = 330, Width = 110, DialogResult = DialogResult.OK, BackColor = permanent ? ColorDeletePermanentBg : ColorDeleteRecycleBg };
             Button cancel = new Button() { Text = "Otkaži", Left = 470, Top = 330, Width = 100, DialogResult = DialogResult.Cancel };
 
             delForm.Controls.AddRange(new Control[] { lbl, lb, ok, cancel });
