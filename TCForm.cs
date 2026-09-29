@@ -1,24 +1,46 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using System.Drawing;
-using System.Text.RegularExpressions;
-using System.Collections.Concurrent;
 
 namespace MiniTC
 {
     public class Program
     {
+        private static void LogCrash(string where, object ex)
+        {
+            try
+            {
+                Directory.CreateDirectory(@"C:\MiniTC");
+                File.AppendAllText(@"C:\MiniTC\crash.log", DateTime.Now + " [" + where + "]\r\n" + ex + "\r\n\r\n");
+            }
+            catch { }
+        }
+
         [STAThread]
         public static void Main(string[] args)
         {
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += (s, e) =>
+            {
+                LogCrash("ThreadException", e.Exception);
+                MessageBox.Show(e.Exception.ToString(), "MiniTC - greska");
+            };
+            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+            {
+                LogCrash("UnhandledException", e.ExceptionObject);
+                try { MessageBox.Show(e.ExceptionObject.ToString(), "MiniTC - fatalna greska"); } catch { }
+            };
+
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Application.Run(new MiniCommander());
@@ -29,7 +51,7 @@ namespace MiniTC
     {
         public static string Show(string text, string caption, string defaultValue = "")
         {
-            Form prompt = new Form()
+            using (Form prompt = new Form()
             {
                 Width = 350,
                 Height = 150,
@@ -38,55 +60,61 @@ namespace MiniTC
                 StartPosition = FormStartPosition.CenterParent,
                 MinimizeBox = false,
                 MaximizeBox = false
-            };
+            })
+            {
+                Label textLabel = new Label() { Left = 10, Top = 10, Width = 320, Text = text };
+                TextBox textBox = new TextBox() { Left = 10, Top = 35, Width = 310, Text = defaultValue };
+                Button confirmation = new Button() { Text = "Ok", Left = 160, Width = 75, Top = 70, DialogResult = DialogResult.OK };
+                Button cancel = new Button() { Text = "Cancel", Left = 245, Width = 75, Top = 70, DialogResult = DialogResult.Cancel };
 
-            Label textLabel = new Label() { Left = 10, Top = 10, Width = 320, Text = text };
-            TextBox textBox = new TextBox() { Left = 10, Top = 35, Width = 310, Text = defaultValue };
-            Button confirmation = new Button() { Text = "Ok", Left = 160, Width = 75, Top = 70, DialogResult = DialogResult.OK };
-            Button cancel = new Button() { Text = "Cancel", Left = 245, Width = 75, Top = 70, DialogResult = DialogResult.Cancel };
+                prompt.Controls.AddRange(new Control[] { textBox, confirmation, cancel, textLabel });
+                prompt.AcceptButton = confirmation;
+                prompt.CancelButton = cancel;
 
-            prompt.Controls.AddRange(new Control[] { textBox, confirmation, cancel, textLabel });
-            prompt.AcceptButton = confirmation;
-            prompt.CancelButton = cancel;
-
-            return prompt.ShowDialog() == DialogResult.OK ? textBox.Text : "";
+                return prompt.ShowDialog() == DialogResult.OK ? textBox.Text : "";
+            }
         }
     }
 
     public static class RecycleBin
     {
+        // x64: podrazumevani Pack (8) odgovara Windows SHFILEOPSTRUCT-u
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-        struct SHFILEOPSTRUCT
+        private struct SHFILEOPSTRUCT
         {
             public IntPtr hwnd;
             public uint wFunc;
             [MarshalAs(UnmanagedType.LPWStr)] public string pFrom;
             [MarshalAs(UnmanagedType.LPWStr)] public string pTo;
             public ushort fFlags;
-            public bool fAnyOperationsAborted;
+            [MarshalAs(UnmanagedType.Bool)] public bool fAnyOperationsAborted;
             public IntPtr hNameMappings;
             [MarshalAs(UnmanagedType.LPWStr)] public string lpszProgressTitle;
         }
 
         [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
-        static extern int SHFileOperation(ref SHFILEOPSTRUCT lpFileOp);
+        private static extern int SHFileOperation(ref SHFILEOPSTRUCT lpFileOp);
 
-        const uint FO_DELETE = 3;
-        const ushort FOF_ALLOWUNDO = 0x40;
-        const ushort FOF_NOCONFIRMATION = 0x10;
-        const ushort FOF_SILENT = 0x4;
+        private const uint FO_DELETE = 3;
+        private const ushort FOF_SILENT = 0x4;
+        private const ushort FOF_NOCONFIRMATION = 0x10;
+        private const ushort FOF_ALLOWUNDO = 0x40;
+        private const ushort FOF_NOERRORUI = 0x400;
 
         public static bool SendToRecycle(string path)
         {
             var fs = new SHFILEOPSTRUCT();
+            fs.hwnd = IntPtr.Zero;
             fs.wFunc = FO_DELETE;
             fs.pFrom = path + "\0\0";
-            fs.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT;
+            fs.pTo = null;
+            fs.fFlags = (ushort)(FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI);
             return SHFileOperation(ref fs) == 0;
         }
 
-        [DllImport("shell32.dll", CharSet = CharSet.Auto)]
-        static extern bool SHObjectProperties(IntPtr hwnd, int shopObjectType, string pszObjectName, string pszPropertyPage);
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SHObjectProperties(IntPtr hwnd, uint shopObjectType, string pszObjectName, string pszPropertyPage);
 
         public static void ShowProperties(string path, IntPtr hwnd)
         {
@@ -97,7 +125,8 @@ namespace MiniTC
     public class MiniCommander : Form
     {
         // ---- ikonice fajlova/foldera (kao u TC), izvuce ih iz sistema po ekstenziji ----
-        [StructLayout(LayoutKind.Sequential)]
+        // VAZNO: Unicode i na strukturi i na DllImport-u, inace se ByValTStr i velicina strukture ne poklapaju (pad u .NET Core/5+)
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         private struct SHFILEINFO
         {
             public IntPtr hIcon;
@@ -107,10 +136,11 @@ namespace MiniTC
             [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 80)] public string szTypeName;
         }
 
-        [DllImport("shell32.dll", CharSet = CharSet.Auto)]
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
         private static extern IntPtr SHGetFileInfo(string pszPath, uint dwFileAttributes, ref SHFILEINFO psfi, uint cbFileInfo, uint uFlags);
 
         [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool DestroyIcon(IntPtr hIcon);
 
         private const uint FILE_ATTRIBUTE_NORMAL = 0x80;
@@ -121,31 +151,40 @@ namespace MiniTC
 
         private static readonly ConcurrentDictionary<string, Image> iconCache = new ConcurrentDictionary<string, Image>(StringComparer.OrdinalIgnoreCase);
 
-        // Uzima generičku ikonicu za ekstenziju/folder direktno iz sistema (bez čitanja pravog fajla - brzo je).
+        // Uzima genericku ikonicu za ekstenziju/folder direktno iz sistema (bez citanja pravog fajla - brzo je).
         private static Image GetIconFor(string nameOrPath, bool isDir)
         {
-            string key = isDir ? "\folder" : Path.GetExtension(nameOrPath).ToLowerInvariant();
-            if (string.IsNullOrEmpty(key) && !isDir) key = "\noext";
+            string key = isDir ? "\\folder" : Path.GetExtension(nameOrPath).ToLowerInvariant();
+            if (string.IsNullOrEmpty(key) && !isDir) key = "\\noext";
 
             Image img;
             if (iconCache.TryGetValue(key, out img)) return img;
 
-            var shfi = new SHFILEINFO();
-            uint attr = isDir ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
-            string dummy = isDir ? "folder" : ("file" + key);
-            IntPtr res = SHGetFileInfo(dummy, attr, ref shfi, (uint)Marshal.SizeOf(shfi), SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
-            if (res != IntPtr.Zero && shfi.hIcon != IntPtr.Zero)
+            img = null;
+            try
             {
-                try { img = Icon.FromHandle(shfi.hIcon).ToBitmap(); }
-                catch { img = null; }
-                finally { DestroyIcon(shfi.hIcon); }
+                var shfi = new SHFILEINFO();
+                uint attr = isDir ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+                string dummy = isDir ? "folder" : ("file" + key);
+                IntPtr res = SHGetFileInfo(dummy, attr, ref shfi, (uint)Marshal.SizeOf<SHFILEINFO>(), SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+                if (res != IntPtr.Zero && shfi.hIcon != IntPtr.Zero)
+                {
+                    try
+                    {
+                        using (var ico = Icon.FromHandle(shfi.hIcon))
+                            img = ico.ToBitmap();
+                    }
+                    catch { img = null; }
+                    finally { DestroyIcon(shfi.hIcon); }
+                }
             }
-            iconCache[key] = img;
+            catch { img = null; }
+
+            if (img != null) iconCache[key] = img;
             return img;
         }
 
         // ========== PUTANJA ZA CONFIG - PROMENI OVDE AKO TREBA ==========
-        // Sada je TXT da ne treba System.Xml.dll
         private const string ConfigFilePath = @"C:\MiniTC\MiniTC.txt";
         // ================================================================
 
@@ -190,14 +229,13 @@ namespace MiniTC
         private string compareToolPath = "";
         private string compareToolParams = "";
 
-
         private ListView lastActive = null;
         private ListView ActiveList { get { return lastActive ?? leftList; } }
 
         private string leftCurrent = @"C:\";
         private string rightCurrent = @"C:\";
 
-        private Font listFont = new Font("Consolas", 14f); //("Calibri", 14f); //
+        private Font listFont = new Font("Consolas", 14f);
 
         private HashSet<string> markedLeft = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private HashSet<string> markedRight = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -304,7 +342,6 @@ namespace MiniTC
             }
         }
 
-
         private class TabInfo
         {
             public string Path;
@@ -317,7 +354,7 @@ namespace MiniTC
 
         public MiniCommander()
         {
-            Text = "Mini TC v1.3 - F6 Move";
+            Text = "Mini TC v1.4 (.NET 9) - F6 Move";
             Width = 1200;
             Height = 800;
             WindowState = FormWindowState.Maximized;
@@ -341,8 +378,6 @@ namespace MiniTC
             toolBar.Items.Add(new ToolStripButton("F6 Premesti", null, (s, e) => MoveSelected()));
             toolBar.Items.Add(new ToolStripButton("F7 Novi Dir", null, (s, e) => CreateFolder()));
             toolBar.Items.Add(new ToolStripButton("F8 Putanja", null, (s, e) => CopyPathToClipboard()));
-            //toolBar.Items.Add(new ToolStripButton("Del Recycle", null, (s, e) => DeleteSelected(false)));
-            //toolBar.Items.Add(new ToolStripButton("Shift+Del", null, (s, e) => DeleteSelected(true)));
             toolBar.Items.Add(new ToolStripSeparator());
             toolBar.Items.Add(new ToolStripButton("Alt+F7 Search", null, (s, e) => OpenSearchDialog()) { ToolTipText = "Pretraga fajlova - Alt+F7" });
             toolBar.Items.Add(new ToolStripButton("F3 Compare", null, (s, e) => RunCompareTool()) { ToolTipText = "Uporedi 2 fajla (1 levo + 1 desno obelezen) - F3" });
@@ -354,12 +389,9 @@ namespace MiniTC
             toolBar.Items.Add(new ToolStripSeparator());
             toolBar.Items.Add(new ToolStripLabel(" Font:"));
 
-            fontCombo = new ToolStripComboBox
-            {
-                Items = { "10", "12", "14", "16", "18", "20", "22", "26", "32" },
-                Text = "14",
-                Width = 60
-            };
+            fontCombo = new ToolStripComboBox { Width = 60 };
+            fontCombo.Items.AddRange(new object[] { "10", "12", "14", "16", "18", "20", "22", "26", "32" });
+            fontCombo.Text = "14";
             fontCombo.SelectedIndexChanged += (s, e) => ChangeFont();
             toolBar.Items.Add(fontCombo);
             toolBar.Items.Add(new ToolStripSeparator());
@@ -373,14 +405,12 @@ namespace MiniTC
             };
             toolBar.Items.Add(shellToggle);
 
+            // SplitterDistance se NE postavlja ovde (kontejner je jos mali -> izuzetak). Postavlja se u FixSplitter().
             topSplit = new SplitContainer
             {
                 Dock = DockStyle.Fill,
-                SplitterDistance = 600,
                 BackColor = ColorSplitter,
                 BorderStyle = BorderStyle.None,
-                Panel1MinSize = 100,
-                Panel2MinSize = 100,
                 SplitterWidth = 6
             };
 
@@ -455,21 +485,11 @@ namespace MiniTC
             this.Resize += (s, e) =>
             {
                 if (this.WindowState == FormWindowState.Minimized) return;
-                if (this.ClientSize.Width < 200) return;
-                try
-                {
-                    int half = this.ClientSize.Width / 2;
-                    int min = topSplit.Panel1MinSize;
-                    int max = this.ClientSize.Width - topSplit.Panel2MinSize - topSplit.SplitterWidth;
-                    if (max < min) max = min;
-                    if (half < min) half = min;
-                    if (half > max) half = max;
-                    topSplit.SplitterDistance = half;
-                    ResizeColumns(leftList);
-                    ResizeColumns(rightList);
-                }
-                catch { }
+                FixSplitter();
+                ResizeColumns(leftList);
+                ResizeColumns(rightList);
             };
+            this.Load += (s, e) => FixSplitter();
 
             LoadDrives();
             LoadTabsFromTxt();
@@ -506,7 +526,29 @@ namespace MiniTC
             ChangeFont();
         }
 
-                private void LoadTabsFromTxt()
+        // Bezbedno podesavanje splittera (min velicine + pola sirine), nikad ne baca izuzetak
+        private void FixSplitter()
+        {
+            try
+            {
+                int total = topSplit.Width;
+                if (total < 250) return;
+
+                topSplit.Panel1MinSize = 100;
+                topSplit.Panel2MinSize = 100;
+
+                int half = total / 2;
+                int min = topSplit.Panel1MinSize;
+                int max = total - topSplit.Panel2MinSize - topSplit.SplitterWidth;
+                if (max < min) return;
+                if (half < min) half = min;
+                if (half > max) half = max;
+                topSplit.SplitterDistance = half;
+            }
+            catch { }
+        }
+
+        private void LoadTabsFromTxt()
         {
             try
             {
@@ -515,9 +557,9 @@ namespace MiniTC
 
                 if (!File.Exists(ConfigFilePath))
                 {
-                    leftTabs = new List<TabInfo> { new TabInfo { Path = @"C:" } };
-                    rightTabs = new List<TabInfo> { new TabInfo { Path = @"C:" } };
-                    if (Directory.Exists(@"D:")) rightTabs[0].Path = @"D:";
+                    leftTabs = new List<TabInfo> { new TabInfo { Path = @"C:\" } };
+                    rightTabs = new List<TabInfo> { new TabInfo { Path = @"C:\" } };
+                    if (Directory.Exists(@"D:\")) rightTabs[0].Path = @"D:\";
                     return;
                 }
 
@@ -558,7 +600,6 @@ namespace MiniTC
                         else if (line.StartsWith("<Folder>", StringComparison.OrdinalIgnoreCase)) { }
                         else if (!line.StartsWith("[") && !line.StartsWith("<"))
                         {
-                            // ako je samo putanja bez Path=, uzmi kao path ako nema
                             if (string.IsNullOrEmpty(compareToolPath) && (File.Exists(line) || line.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)))
                                 compareToolPath = line;
                         }
@@ -586,16 +627,18 @@ namespace MiniTC
                     }
                 }
 
-                if (leftTabs.Count == 0) leftTabs.Add(new TabInfo { Path = @"C:" });
-                if (rightTabs.Count == 0) rightTabs.Add(new TabInfo { Path = @"C:" });
+                if (leftTabs.Count == 0) leftTabs.Add(new TabInfo { Path = @"C:\" });
+                if (rightTabs.Count == 0) rightTabs.Add(new TabInfo { Path = @"C:\" });
 
                 leftTabIdx = 0;
                 rightTabIdx = 0;
             }
             catch
             {
-                leftTabs = new List<TabInfo> { new TabInfo { Path = @"C:" } };
-                rightTabs = new List<TabInfo> { new TabInfo { Path = @"C:" } };
+                leftTabs = new List<TabInfo> { new TabInfo { Path = @"C:\" } };
+                rightTabs = new List<TabInfo> { new TabInfo { Path = @"C:\" } };
+                leftTabIdx = 0;
+                rightTabIdx = 0;
             }
         }
 
@@ -684,8 +727,10 @@ namespace MiniTC
         {
             try
             {
-                if (path.EndsWith(":\\")) return path;
-                return Path.GetFileName(path.TrimEnd('\\'));
+                if (string.IsNullOrEmpty(path)) return "";
+                if (path.EndsWith(":\\") || path.EndsWith(":")) return path;
+                string n = Path.GetFileName(path.TrimEnd('\\'));
+                return string.IsNullOrEmpty(n) ? path : n;
             }
             catch { return path; }
         }
@@ -859,7 +904,7 @@ namespace MiniTC
                     return;
                 }
 
-                // FIX: Path.Combine puca na '>' '<' '|' itd. - obmotaj u try/catch i preskoci ako ima illegal chars
+                // Path.Combine puca na '>' '<' '|' itd. - preskoci ako ima illegal chars
                 bool hasIllegal = cmd.IndexOfAny(new char[] { '>', '<', '|', '"' }) >= 0;
 
                 if (!hasIllegal)
@@ -888,19 +933,16 @@ namespace MiniTC
                 }
                 catch { }
 
-                // Probaj da otvoris kao komandu sa argumentima - npr. "notepad proba.txt" ili "notepad >proba.txt"
-                // Ako prvi token postoji kao fajl ili exe u PATH, pokreni ga
+                // "notepad proba.txt" ili "notepad >proba.txt"
                 try
                 {
                     string firstToken = cmd.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
                     if (!string.IsNullOrEmpty(firstToken))
                     {
-                        // ako je notepad, calc, mspaint itd - pusti direktno
                         if (firstToken.Equals("notepad", StringComparison.OrdinalIgnoreCase) ||
                             firstToken.Equals("calc", StringComparison.OrdinalIgnoreCase) ||
                             firstToken.Equals("mspaint", StringComparison.OrdinalIgnoreCase))
                         {
-                            // pokreni preko shell-a da bi radio i sa ">" redirekcijom
                             Process.Start(new ProcessStartInfo("cmd.exe", "/c cd /d \"" + activeCur + "\" && " + cmd)
                             {
                                 UseShellExecute = true,
@@ -943,35 +985,26 @@ namespace MiniTC
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
-            // BUG FIX: kada kucas u donjem edit boxu (cmdBox) ili u path boxevima, disable sve shortcutove
-            // da Space ne selektuje fajl nego da ubaci razmak, Delete ne brise itd.
+            // kada kucas u donjem edit boxu (cmdBox) ili u path boxevima, disable shortcutove
             var focused = this.ActiveControl;
             bool isTyping = focused is TextBoxBase || focused is ComboBox;
-            // ToolStripComboBox fontCombo je malo drugaciji, proveri i da li je cmdBox fokusiran direktno
             if (isTyping || (cmdBox != null && cmdBox.Focused) || (leftPath != null && leftPath.Focused) || (rightPath != null && rightPath.Focused))
             {
-                // dozvoli samo Ctrl+T/W/Tab za tabove i F3 za compare da i dalje rade cak i kad kucas? 
-                // Po zahtevu: moraju biti disable-ovani SVI ostali shortcutovi kad kucas dole
-                // Zato ovde vracamo base da TextBox normalno obradi Space, Delete, itd.
-                // Ali F3, Ctrl+T/W/Tab ostavljamo da rade i dok kucas dole ako bas hoces
                 if (keyData == Keys.Space || keyData == Keys.Delete || keyData == (Keys.Shift | Keys.Delete) || keyData == Keys.Escape)
                     return base.ProcessCmdKey(ref msg, keyData);
 
-                // Za Tab koji switchuje panele - kad kucas u cmdBox, Tab ne treba da switchuje
                 if (isTyping && (keyData == Keys.Tab || keyData == (Keys.Control | Keys.Left) || keyData == (Keys.Control | Keys.Right)))
                     return base.ProcessCmdKey(ref msg, keyData);
             }
 
             if (keyData == Keys.F3)
             {
-                // F3 ipak dozvoli i kad kucas dole - to je compare
                 RunCompareTool();
                 return true;
             }
 
             if (keyData == Keys.Tab)
             {
-                // ako je fokus u TextBoxu, ne switchuj panele
                 if (isTyping) return base.ProcessCmdKey(ref msg, keyData);
                 SwitchPanel();
                 return true;
@@ -1103,9 +1136,10 @@ namespace MiniTC
         private void ChangeFont()
         {
             float size = 14f;
-            float.TryParse(fontCombo.Text, out size);
+            if (!float.TryParse(fontCombo.Text, out size)) size = 14f;
             if (size < 8) size = 14;
 
+            var oldFont = listFont;
             listFont = new Font("Consolas", size, FontStyle.Regular);
             Font uiFont = new Font("Consolas", size, FontStyle.Regular);
 
@@ -1128,6 +1162,7 @@ namespace MiniTC
 
         private void ResizeColumns(ListView lv)
         {
+            if (lv == null || lv.Columns.Count < 4) return;
             if (lv.ClientSize.Width < 50) return;
 
             int w = lv.ClientSize.Width - 4;
@@ -1183,7 +1218,8 @@ namespace MiniTC
 
             lv.DrawColumnHeader += (s, e) =>
             {
-                e.Graphics.FillRectangle(new SolidBrush(ColorHeaderBg), e.Bounds);
+                using (var hb = new SolidBrush(ColorHeaderBg))
+                    e.Graphics.FillRectangle(hb, e.Bounds);
                 TextRenderer.DrawText(e.Graphics, e.Header.Text, listFont, e.Bounds, ColorHeaderFg, TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
             };
 
@@ -1193,7 +1229,7 @@ namespace MiniTC
             {
                 var list = s as ListView;
                 string fullPath = e.Item.Tag as string;
-                bool isMarked = list == leftList ? markedLeft.Contains(fullPath) : markedRight.Contains(fullPath);
+                bool isMarked = fullPath != null && (list == leftList ? markedLeft.Contains(fullPath) : markedRight.Contains(fullPath));
                 bool isFocusedItem = e.Item.Focused && list.Focused;
 
                 Color back = isFocusedItem ? ColorSelBg : ColorBg;
@@ -1202,25 +1238,31 @@ namespace MiniTC
                 using (var b = new SolidBrush(back))
                     e.Graphics.FillRectangle(b, e.Bounds);
 
-                var f = isMarked ? new Font(listFont, FontStyle.Bold) : listFont;
-                var textPos = e.Bounds.Location;
-
-                if (e.ColumnIndex == 0)
+                Font f = isMarked ? new Font(listFont, FontStyle.Bold) : listFont;
+                try
                 {
-                    bool isUp = e.Item.Text == "[..]";
-                    bool isDirRow = e.Item.SubItems.Count > 1 &&
-                        (e.Item.SubItems[1].Text == "<DIR>" || e.Item.SubItems[1].Text == "<DIR UP>");
-                    Image icon = GetIconFor(isDirRow ? "" : (fullPath ?? e.Item.Text), isDirRow);
-                    if (icon != null)
-                    {
-                        int iy = e.Bounds.Top + (e.Bounds.Height - 16) / 2;
-                        e.Graphics.DrawImage(icon, e.Bounds.Left + 2, iy, 16, 16);
-                    }
-                    textPos = new Point(e.Bounds.Left + 2 + 16 + 4, e.Bounds.Top);
-                }
+                    var textPos = e.Bounds.Location;
 
-                e.Graphics.DrawString(e.SubItem.Text, f, new SolidBrush(fore), textPos);
-                if (isMarked) f.Dispose();
+                    if (e.ColumnIndex == 0)
+                    {
+                        bool isDirRow = e.Item.SubItems.Count > 1 &&
+                            (e.Item.SubItems[1].Text == "<DIR>" || e.Item.SubItems[1].Text == "<DIR UP>");
+                        Image icon = GetIconFor(isDirRow ? "" : (fullPath ?? e.Item.Text), isDirRow);
+                        if (icon != null)
+                        {
+                            int iy = e.Bounds.Top + (e.Bounds.Height - 16) / 2;
+                            e.Graphics.DrawImage(icon, e.Bounds.Left + 2, iy, 16, 16);
+                        }
+                        textPos = new Point(e.Bounds.Left + 2 + 16 + 4, e.Bounds.Top);
+                    }
+
+                    using (var fb = new SolidBrush(fore))
+                        e.Graphics.DrawString(e.SubItem.Text, f, fb, textPos);
+                }
+                finally
+                {
+                    if (isMarked) f.Dispose();
+                }
             };
 
             lv.MouseClick += (s, e) =>
@@ -1233,7 +1275,8 @@ namespace MiniTC
                         item.Selected = true;
                         item.Focused = true;
                         lastActive = lv;
-                        ShowExplorerContextMenu(item.Tag as string);
+                        string p = item.Tag as string;
+                        if (!string.IsNullOrEmpty(p)) ShowExplorerContextMenu(p);
                     }
                 }
             };
@@ -1287,22 +1330,33 @@ namespace MiniTC
             }
 
             var menu2 = new ContextMenuStrip();
-            menu2.Items.Add("Otvori", null, (s, e) => { Process.Start(new ProcessStartInfo(path) { UseShellExecute = true }); });
+            menu2.Items.Add("Otvori", null, (s, e) =>
+            {
+                try { Process.Start(new ProcessStartInfo(path) { UseShellExecute = true }); }
+                catch (Exception ex) { MessageBox.Show("Ne mogu da otvorim: " + ex.Message); }
+            });
             if (File.Exists(path)) menu2.Items.Add("Otvori u Notepadu (F4)", null, (s, e) => OpenInNotepad());
             menu2.Items.Add("Kopiraj putanju (F8)", null, (s, e) => CopyPathToClipboard());
             menu2.Items.Add(new ToolStripSeparator());
             menu2.Items.Add("Iseci", null, (s, e) =>
             {
-                var sc = new System.Collections.Specialized.StringCollection();
-                sc.Add(path);
-                Clipboard.SetFileDropList(sc);
+                try
+                {
+                    SetClipboardFiles(new List<string> { path }, true);
+                    _isCutOperation = true;
+                    _clipboardCutList = new List<string> { path };
+                }
+                catch (Exception ex) { MessageBox.Show("Clipboard greška: " + ex.Message); }
             });
             menu2.Items.Add("Kopiraj", null, (s, e) =>
             {
-                var sc = new System.Collections.Specialized.StringCollection();
-                sc.Add(path);
-                Clipboard.SetFileDropList(sc);
-                SafeClipboard(path);
+                try
+                {
+                    SetClipboardFiles(new List<string> { path }, false);
+                    _isCutOperation = false;
+                    _clipboardCutList = null;
+                }
+                catch (Exception ex) { MessageBox.Show("Clipboard greška: " + ex.Message); }
             });
             menu2.Items.Add(new ToolStripSeparator());
             menu2.Items.Add("Pošalji u Recycle Bin", null, (s, e) => DeleteSelected(false));
@@ -1311,8 +1365,8 @@ namespace MiniTC
             menu2.Items.Add("Svojstva", null, (s, e) => RecycleBin.ShowProperties(path, this.Handle));
             menu2.Items.Add("Otvori u Exploreru", null, (s, e) =>
             {
-                string arg = File.Exists(path) ? $"/select, \"{path}\"" : $"\"{path}\"";
-                Process.Start("explorer.exe", arg);
+                string arg = File.Exists(path) ? "/select, \"" + path + "\"" : "\"" + path + "\"";
+                try { Process.Start("explorer.exe", arg); } catch { }
             });
             menu2.Show(Cursor.Position);
         }
@@ -1323,7 +1377,8 @@ namespace MiniTC
 
             var item = ActiveList.SelectedItems[0];
             string path = item.Tag as string;
-            if (path.EndsWith("..") || string.IsNullOrEmpty(path)) return;
+            if (string.IsNullOrEmpty(path) || path.EndsWith("..")) return;
+            if (item.Text == "[..]") return;
 
             if (ActiveMarked.Contains(path)) ActiveMarked.Remove(path);
             else ActiveMarked.Add(path);
@@ -1344,18 +1399,25 @@ namespace MiniTC
 
         private void LoadDrives()
         {
-            var drives = DriveInfo.GetDrives().Where(d => d.IsReady).Select(d => d.RootDirectory.FullName).ToArray();
+            string[] drives;
+            try
+            {
+                drives = DriveInfo.GetDrives().Where(d => { try { return d.IsReady; } catch { return false; } })
+                                  .Select(d => d.RootDirectory.FullName).ToArray();
+            }
+            catch { drives = new string[] { @"C:\" }; }
+
             leftDrive.Items.AddRange(drives);
             rightDrive.Items.AddRange(drives);
             if (drives.Length > 0) leftDrive.SelectedIndex = 0;
             if (drives.Length > 1) rightDrive.SelectedIndex = 1;
         }
 
-                private void LoadFolder(ListView list, TextBox pathBox, string path, string pathToSelect)
+        private void LoadFolder(ListView list, TextBox pathBox, string path, string pathToSelect)
         {
             try
             {
-                if (!Directory.Exists(path)) path = @"C:";
+                if (string.IsNullOrEmpty(path) || !Directory.Exists(path)) path = @"C:\";
                 pathBox.Text = path;
 
                 if (list == leftList)
@@ -1398,10 +1460,10 @@ namespace MiniTC
                 }
                 catch { }
 
-                IEnumerable<DirectoryInfo> dirs = new List<DirectoryInfo>();
+                var dirs = new List<DirectoryInfo>();
                 try
                 {
-                    dirs = dirInfo.EnumerateDirectories();
+                    foreach (var d in dirInfo.EnumerateDirectories()) dirs.Add(d);
                 }
                 catch (UnauthorizedAccessException)
                 {
@@ -1428,9 +1490,11 @@ namespace MiniTC
                     catch { }
                 }
 
-                IEnumerable<FileInfo> files = new List<FileInfo>();
-                try { files = dirInfo.EnumerateFiles(); }
-                catch (UnauthorizedAccessException) { }
+                var files = new List<FileInfo>();
+                try
+                {
+                    foreach (var f in dirInfo.EnumerateFiles()) files.Add(f);
+                }
                 catch { }
 
                 foreach (var f in files)
@@ -1513,7 +1577,7 @@ namespace MiniTC
             }
         }
 
-                private void EnterFolder()
+        private void EnterFolder()
         {
             if (ActiveList.SelectedItems.Count == 0) return;
 
@@ -1555,12 +1619,11 @@ namespace MiniTC
 
         private void OnKeyDown(object sender, KeyEventArgs e)
         {
-            // BUG FIX: ako kucas u cmdBox ili path boxevima, ne hvataj Alt+slovo i ostale precice
+            // ako kucas u cmdBox ili path boxevima, ne hvataj Alt+slovo i ostale precice
             var focused = this.ActiveControl;
             bool isTyping = focused is TextBoxBase || focused is ComboBox || (cmdBox != null && cmdBox.Focused) || (leftPath != null && leftPath.Focused) || (rightPath != null && rightPath.Focused);
             if (isTyping)
             {
-                // dozvoli samo da prodje normalno kucanje
                 return;
             }
 
@@ -1687,6 +1750,7 @@ namespace MiniTC
             string path = item.Tag as string;
             if (item.Text == "[..]")
                 path = ActiveList == leftList ? leftCurrent : rightCurrent;
+            if (string.IsNullOrEmpty(path)) return;
 
             SafeClipboard(path);
             statusLabel.Text = " Kopirano: " + path;
@@ -1698,12 +1762,14 @@ namespace MiniTC
             if (ActiveList.SelectedItems.Count == 0) return;
             var path = ActiveList.SelectedItems[0].Tag as string;
             if (itemIsFile(path))
-                Process.Start("notepad.exe", "\"" + path + "\"");
+            {
+                try { Process.Start("notepad.exe", "\"" + path + "\""); } catch { }
+            }
         }
 
         private bool itemIsFile(string p)
         {
-            return File.Exists(p);
+            return !string.IsNullOrEmpty(p) && File.Exists(p);
         }
 
         private async void CopySelected()
@@ -1718,7 +1784,7 @@ namespace MiniTC
             {
                 if (list.SelectedItems.Count == 0) return;
                 var sel = list.SelectedItems[0].Tag as string;
-                if (sel.EndsWith("..") || string.IsNullOrEmpty(sel)) return;
+                if (string.IsNullOrEmpty(sel) || sel.EndsWith("..")) return;
                 toCopy = new List<string> { sel };
             }
 
@@ -1791,7 +1857,7 @@ namespace MiniTC
             {
                 if (list.SelectedItems.Count == 0) return;
                 var sel = list.SelectedItems[0].Tag as string;
-                if (sel.EndsWith("..") || string.IsNullOrEmpty(sel)) return;
+                if (string.IsNullOrEmpty(sel) || sel.EndsWith("..")) return;
                 toMove = new List<string> { sel };
             }
 
@@ -1807,7 +1873,6 @@ namespace MiniTC
                     if (File.Exists(src))
                     {
                         string dest = Path.Combine(destDir, Path.GetFileName(src));
-                        // ako postoji, pitaj ili pregazi? Za sad pregazi
                         if (File.Exists(dest))
                         {
                             var r = MessageBox.Show("Fajl vec postoji:\n" + dest + "\nPregaziti?", "F6 Move", MessageBoxButtons.YesNo);
@@ -1823,7 +1888,6 @@ namespace MiniTC
                         {
                             var r = MessageBox.Show("Folder vec postoji:\n" + dest + "\nPremestiti unutra?", "F6 Move", MessageBoxButtons.YesNo);
                             if (r != DialogResult.Yes) continue;
-                            // premesti sadrzaj unutra
                             dest = Path.Combine(dest, Path.GetFileName(src));
                         }
                         await Task.Run(() => MoveDirectory(src, dest));
@@ -1841,18 +1905,25 @@ namespace MiniTC
             UpdateStatus();
         }
 
-
         private void CreateFolder()
         {
             var box = ActiveList == leftList ? leftPath : rightPath;
             string input = Prompt.Show("Ime foldera:", "F7", "Novi folder");
             if (string.IsNullOrWhiteSpace(input)) return;
 
-            Directory.CreateDirectory(Path.Combine(box.Text, input));
-            LoadFolder(ActiveList, box, box.Text, Path.Combine(box.Text, input));
+            try
+            {
+                string full = Path.Combine(box.Text, input);
+                Directory.CreateDirectory(full);
+                LoadFolder(ActiveList, box, box.Text, full);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Greska pri kreiranju foldera: " + ex.Message);
+            }
         }
 
-        // 4. Shift+F6 Rename - custom prompt bez VB dll, sa selektovanim tekstom
+        // Shift+F6 Rename
         private void RenameSelected()
         {
             if (ActiveList.SelectedItems.Count == 0) return;
@@ -1870,7 +1941,6 @@ namespace MiniTC
             if (string.IsNullOrWhiteSpace(newName)) return;
             if (newName == oldName) return;
 
-            // zabrani nevalidne karaktere
             if (newName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
             {
                 MessageBox.Show("Ime sadrzi nedozvoljene karaktere: " + new string(Path.GetInvalidFileNameChars()));
@@ -1894,7 +1964,6 @@ namespace MiniTC
                 else
                     return;
 
-                // osvezi listu i selektuj novi fajl
                 var box = ActiveList == leftList ? leftPath : rightPath;
                 LoadFolder(ActiveList, box, box.Text, newPath);
             }
@@ -1906,7 +1975,7 @@ namespace MiniTC
 
         private string ShowRenameDialog(string oldName)
         {
-            Form prompt = new Form()
+            using (Form prompt = new Form()
             {
                 Width = 420,
                 Height = 150,
@@ -1916,31 +1985,32 @@ namespace MiniTC
                 MinimizeBox = false,
                 MaximizeBox = false,
                 ShowInTaskbar = false
-            };
-
-            Label textLabel = new Label() { Left = 10, Top = 10, Width = 390, Text = "Novo ime:" };
-            TextBox textBox = new TextBox() { Left = 10, Top = 35, Width = 380, Text = oldName };
-
-            Button confirmation = new Button() { Text = "Ok", Left = 210, Width = 85, Top = 70, DialogResult = DialogResult.OK };
-            Button cancel = new Button() { Text = "Cancel", Left = 305, Width = 85, Top = 70, DialogResult = DialogResult.Cancel };
-
-            prompt.Controls.AddRange(new Control[] { textBox, confirmation, cancel, textLabel });
-            prompt.AcceptButton = confirmation;
-            prompt.CancelButton = cancel;
-
-            prompt.Shown += (s, e) =>
+            })
             {
-                textBox.Focus();
-                textBox.SelectAll();
-            };
+                Label textLabel = new Label() { Left = 10, Top = 10, Width = 390, Text = "Novo ime:" };
+                TextBox textBox = new TextBox() { Left = 10, Top = 35, Width = 380, Text = oldName };
 
-            return prompt.ShowDialog(this) == DialogResult.OK ? textBox.Text.Trim() : "";
+                Button confirmation = new Button() { Text = "Ok", Left = 210, Width = 85, Top = 70, DialogResult = DialogResult.OK };
+                Button cancel = new Button() { Text = "Cancel", Left = 305, Width = 85, Top = 70, DialogResult = DialogResult.Cancel };
+
+                prompt.Controls.AddRange(new Control[] { textBox, confirmation, cancel, textLabel });
+                prompt.AcceptButton = confirmation;
+                prompt.CancelButton = cancel;
+
+                prompt.Shown += (s, e) =>
+                {
+                    textBox.Focus();
+                    textBox.SelectAll();
+                };
+
+                return prompt.ShowDialog(this) == DialogResult.OK ? textBox.Text.Trim() : "";
+            }
         }
 
         // ========== 5. COMPARE TOOL ==========
         private void SetupCompareTool()
         {
-            Form f = new Form()
+            using (Form f = new Form()
             {
                 Width = 600,
                 Height = 220,
@@ -1949,55 +2019,50 @@ namespace MiniTC
                 StartPosition = FormStartPosition.CenterParent,
                 MinimizeBox = false,
                 MaximizeBox = false
-            };
-
-            Label lblPath = new Label() { Left = 10, Top = 15, Width = 560, Text = "Putanja do BeyondCompare.exe / WinMergeU.exe / vsdiffmerge.exe itd:" };
-            TextBox txtPath = new TextBox() { Left = 10, Top = 35, Width = 460, Text = compareToolPath };
-            Button btnBrowse = new Button() { Left = 480, Top = 33, Width = 80, Text = "Browse..." };
-
-            Label lblParams = new Label() { Left = 10, Top = 65, Width = 560, Text = "Parametri (ostavi prazno za default file1 file2 ili npr. %1 %2):" };
-            TextBox txtParams = new TextBox() { Left = 10, Top = 85, Width = 560, Text = compareToolParams };
-
-            Label lblHint = new Label() { Left = 10, Top = 110, Width = 560, Height = 30, ForeColor = ColorHintFg, Text = @"Primer Beyond: C:\Program Files\Beyond Compare 4\BCompare.exe | Params: prazno" };
-
-            Button ok = new Button() { Text = "Sacuvaj", Left = 380, Top = 145, Width = 90, DialogResult = DialogResult.OK };
-            Button cancel = new Button() { Text = "Otkaži", Left = 480, Top = 145, Width = 90, DialogResult = DialogResult.Cancel };
-
-btnBrowse.Click += (s, e) =>
+            })
             {
-                var thread = new Thread(() =>
+                Label lblPath = new Label() { Left = 10, Top = 15, Width = 560, Text = "Putanja do BeyondCompare.exe / WinMergeU.exe / vsdiffmerge.exe itd:" };
+                TextBox txtPath = new TextBox() { Left = 10, Top = 35, Width = 460, Text = compareToolPath };
+                Button btnBrowse = new Button() { Left = 480, Top = 33, Width = 80, Text = "Browse..." };
+
+                Label lblParams = new Label() { Left = 10, Top = 65, Width = 560, Text = "Parametri (ostavi prazno za default file1 file2 ili npr. %1 %2):" };
+                TextBox txtParams = new TextBox() { Left = 10, Top = 85, Width = 560, Text = compareToolParams };
+
+                Label lblHint = new Label() { Left = 10, Top = 110, Width = 560, Height = 30, ForeColor = ColorHintFg, Text = @"Primer Beyond: C:\Program Files\Beyond Compare 4\BCompare.exe | Params: prazno" };
+
+                Button ok = new Button() { Text = "Sacuvaj", Left = 380, Top = 145, Width = 90, DialogResult = DialogResult.OK };
+                Button cancel = new Button() { Text = "Otkaži", Left = 480, Top = 145, Width = 90, DialogResult = DialogResult.Cancel };
+
+                // Dialog radi na UI (STA) threadu - nema potrebe za posebnim threadom
+                btnBrowse.Click += (s, e) =>
                 {
-                    OpenFileDialog dlg = new OpenFileDialog()
+                    using (OpenFileDialog dlg = new OpenFileDialog()
                     {
                         Filter = "EXE files|*.exe|All files|*.*",
                         Title = "Izaberi compare tool"
-                    };
-                    if (!string.IsNullOrWhiteSpace(txtPath.Text) && File.Exists(txtPath.Text))
+                    })
                     {
-                        try { dlg.InitialDirectory = Path.GetDirectoryName(txtPath.Text); } catch { }
+                        if (!string.IsNullOrWhiteSpace(txtPath.Text) && File.Exists(txtPath.Text))
+                        {
+                            try { dlg.InitialDirectory = Path.GetDirectoryName(txtPath.Text); } catch { }
+                        }
+                        if (dlg.ShowDialog(f) == DialogResult.OK)
+                            txtPath.Text = dlg.FileName;
                     }
-                    if (dlg.ShowDialog() == DialogResult.OK)
-                    {
-                        string file = dlg.FileName;
-                        f.BeginInvoke(new Action(() => { txtPath.Text = file; }));
-                    }
-                });
-                thread.SetApartmentState(ApartmentState.STA);
-                thread.IsBackground = true;
-                thread.Start();
-            };
+                };
 
-            f.Controls.AddRange(new Control[] { lblPath, txtPath, btnBrowse, lblParams, txtParams, lblHint, ok, cancel });
-            f.AcceptButton = ok;
-            f.CancelButton = cancel;
+                f.Controls.AddRange(new Control[] { lblPath, txtPath, btnBrowse, lblParams, txtParams, lblHint, ok, cancel });
+                f.AcceptButton = ok;
+                f.CancelButton = cancel;
 
-            if (f.ShowDialog(this) == DialogResult.OK)
-            {
-                compareToolPath = txtPath.Text.Trim();
-                compareToolParams = txtParams.Text.Trim();
-                SaveTabsToTxt();
-                statusLabel.Text = " Compare tool sacuvan: " + compareToolPath;
-                lastStatus = statusLabel.Text;
+                if (f.ShowDialog(this) == DialogResult.OK)
+                {
+                    compareToolPath = txtPath.Text.Trim();
+                    compareToolParams = txtParams.Text.Trim();
+                    SaveTabsToTxt();
+                    statusLabel.Text = " Compare tool sacuvan: " + compareToolPath;
+                    lastStatus = statusLabel.Text;
+                }
             }
         }
 
@@ -2021,7 +2086,6 @@ btnBrowse.Click += (s, e) =>
             }
             else if (markedLeft.Count == 2 && markedRight.Count == 0)
             {
-                // oba na levoj strani obelezena
                 var arr = markedLeft.ToArray();
                 fileA = arr[0];
                 fileB = arr[1];
@@ -2069,7 +2133,6 @@ btnBrowse.Click += (s, e) =>
                 }
                 else
                 {
-                    // podrska za %1 %2 placeholder
                     if (compareToolParams.Contains("%1") || compareToolParams.Contains("%2"))
                     {
                         args = compareToolParams.Replace("%1", "\"" + fileA + "\"").Replace("%2", "\"" + fileB + "\"");
@@ -2090,14 +2153,11 @@ btnBrowse.Click += (s, e) =>
             }
         }
 
-
-
-
-        // ========== 6. ALT+F7 SEARCH - FULL VERZIJA ==========
+        // ========== 6. ALT+F7 SEARCH ==========
         private void OpenSearchDialog()
         {
             string root = ActiveList == leftList ? leftCurrent : rightCurrent;
-            Form dlg = new Form()
+            using (Form dlg = new Form()
             {
                 Width = 450,
                 Height = 200,
@@ -2107,26 +2167,27 @@ btnBrowse.Click += (s, e) =>
                 MinimizeBox = false,
                 MaximizeBox = false,
                 ShowInTaskbar = false
-            };
-
-            Label lbl = new Label() { Left = 10, Top = 15, Width = 400, Text = "Traži (npr *.cs , *form* , MiniTC):" };
-            TextBox txt = new TextBox() { Left = 10, Top = 35, Width = 410, Text = "" };
-            CheckBox chkSub = new CheckBox() { Left = 10, Top = 65, Width = 180, Text = "Uključi podfoldere", Checked = true };
-            CheckBox chkCase = new CheckBox() { Left = 200, Top = 65, Width = 180, Text = "Case sensitive", Checked = false };
-
-            Button ok = new Button() { Text = "Traži", Left = 240, Top = 100, Width = 80, DialogResult = DialogResult.OK };
-            Button cancel = new Button() { Text = "Otkaži", Left = 330, Top = 100, Width = 90, DialogResult = DialogResult.Cancel };
-
-            dlg.Controls.AddRange(new Control[] { lbl, txt, chkSub, chkCase, ok, cancel });
-            dlg.AcceptButton = ok;
-            dlg.CancelButton = cancel;
-            txt.Focus();
-
-            if (dlg.ShowDialog(this) == DialogResult.OK)
+            })
             {
-                string pattern = txt.Text.Trim();
-                if (string.IsNullOrWhiteSpace(pattern)) return;
-                ShowSearchResults(pattern, root, chkSub.Checked, chkCase.Checked);
+                Label lbl = new Label() { Left = 10, Top = 15, Width = 400, Text = "Traži (npr *.cs , *form* , MiniTC):" };
+                TextBox txt = new TextBox() { Left = 10, Top = 35, Width = 410, Text = "" };
+                CheckBox chkSub = new CheckBox() { Left = 10, Top = 65, Width = 180, Text = "Uključi podfoldere", Checked = true };
+                CheckBox chkCase = new CheckBox() { Left = 200, Top = 65, Width = 180, Text = "Case sensitive", Checked = false };
+
+                Button ok = new Button() { Text = "Traži", Left = 240, Top = 100, Width = 80, DialogResult = DialogResult.OK };
+                Button cancel = new Button() { Text = "Otkaži", Left = 330, Top = 100, Width = 90, DialogResult = DialogResult.Cancel };
+
+                dlg.Controls.AddRange(new Control[] { lbl, txt, chkSub, chkCase, ok, cancel });
+                dlg.AcceptButton = ok;
+                dlg.CancelButton = cancel;
+                dlg.Shown += (s, e) => txt.Focus();
+
+                if (dlg.ShowDialog(this) == DialogResult.OK)
+                {
+                    string pattern = txt.Text.Trim();
+                    if (string.IsNullOrWhiteSpace(pattern)) return;
+                    ShowSearchResults(pattern, root, chkSub.Checked, chkCase.Checked);
+                }
             }
         }
 
@@ -2181,20 +2242,32 @@ btnBrowse.Click += (s, e) =>
             Label lblCount = new Label() { Dock = DockStyle.Bottom, Height = 24, BackColor = ColorToolbarBg, ForeColor = ColorAccent, Text = " Pronađeno: 0" };
 
             Panel bottomPanel = new Panel() { Dock = DockStyle.Bottom, Height = 40, BackColor = ColorToolbarBg };
-            Button btnGoto = new Button() { Text = "Idi na fajl (Enter)", Left = 10, Top = 8, Width = 140, BackColor = ColorGotoBtnBg };
+            Button btnGoto = new Button() { Text = "Idi na fajl (Enter)", Left = 10, Top = 8, Width = 140, BackColor = ColorGotoBtnBg, ForeColor = Color.Black };
             Button btnOpen = new Button() { Text = "Otvori", Left = 160, Top = 8, Width = 80 };
             Button btnClose = new Button() { Text = "Zatvori (Esc)", Left = 780, Top = 8, Width = 100, DialogResult = DialogResult.Cancel };
             bottomPanel.Controls.AddRange(new Control[] { btnGoto, btnOpen, btnClose });
+            resForm.CancelButton = btnClose;
 
             resForm.Controls.Add(lv);
             resForm.Controls.Add(bottomPanel);
             resForm.Controls.Add(lblCount);
             resForm.Controls.Add(lblStatus);
 
-            List<string> foundFiles = new List<string>();
-            bool cancelSearch = false;
+            var foundFiles = new List<string>();
+            var cts = new CancellationTokenSource();
 
-            resForm.FormClosing += (s, e) => { cancelSearch = true; };
+            resForm.FormClosing += (s, e) => { cts.Cancel(); };
+
+            // Bezbedan UI poziv iz background threada (forma moze vec biti zatvorena)
+            Action<Action> ui = (a) =>
+            {
+                try
+                {
+                    if (!resForm.IsDisposed && resForm.IsHandleCreated)
+                        resForm.BeginInvoke(a);
+                }
+                catch { }
+            };
 
             Action<string> goToFile = (fullPath) =>
             {
@@ -2203,7 +2276,6 @@ btnBrowse.Click += (s, e) =>
                     if (File.Exists(fullPath))
                     {
                         string dir = Path.GetDirectoryName(fullPath);
-                        // lociraj u aktivnom panelu
                         LoadFolder(ActiveList, ActiveList == leftList ? leftPath : rightPath, dir, fullPath);
                         resForm.Close();
                         ActiveList.Focus();
@@ -2255,108 +2327,120 @@ btnBrowse.Click += (s, e) =>
                 }
             };
 
-            // Pokreni pretragu u background threadu
-            Task.Run(() =>
-            {
-                try
-                {
-                    var stack = new Stack<string>();
-                    stack.Push(root);
-                    int count = 0;
-                    while (stack.Count > 0 && !cancelSearch && count < 1000)
-                    {
-                        string currentDir = stack.Pop();
-                        try
-                        {
-                            // fajlovi u ovom folderu
-                            foreach (var file in Directory.EnumerateFiles(currentDir))
-                            {
-                                if (cancelSearch || count >= 1000) break;
-                                try
-                                {
-                                    string name = Path.GetFileName(file);
-                                    if (IsSearchMatch(name, pattern, caseSensitive))
-                                    {
-                                        lock (foundFiles) { foundFiles.Add(file); }
-                                        count++;
-                                        // update UI
-                                        resForm.BeginInvoke(new Action(() =>
-                                        {
-                                            try
-                                            {
-                                                var fi = new FileInfo(file);
-                                                var item = new ListViewItem(fi.Name) { Tag = file };
-                                                item.SubItems.Add(Path.GetDirectoryName(file));
-                                                item.SubItems.Add(FormatSize(fi.Length));
-                                                item.SubItems.Add(fi.LastWriteTime.ToString("dd.MM.yyyy HH:mm"));
-                                                lv.Items.Add(item);
-                                                lblCount.Text = " Pronađeno: " + lv.Items.Count + (count >= 1000 ? " (limit 1000)" : "");
-                                            }
-                                            catch { }
-                                        }));
-                                    }
-                                }
-                                catch { }
-                            }
+            var token = cts.Token;
 
-                            // folderi - da li da idemo rekurzivno?
-                            if (includeSub)
+            // Pretragu pokrecemo TEK kad forma dobije handle (Shown), inace BeginInvoke baca izuzetak
+            resForm.Shown += (s0, e0) =>
+            {
+                Task.Run(() =>
+                {
+                    try
+                    {
+                        var stack = new Stack<string>();
+                        stack.Push(root);
+                        int count = 0;
+                        while (stack.Count > 0 && !token.IsCancellationRequested && count < 1000)
+                        {
+                            string currentDir = stack.Pop();
+                            try
                             {
-                                foreach (var dir in Directory.EnumerateDirectories(currentDir))
+                                foreach (var file in Directory.EnumerateFiles(currentDir))
                                 {
-                                    if (cancelSearch) break;
+                                    if (token.IsCancellationRequested || count >= 1000) break;
                                     try
                                     {
-                                        var di = new DirectoryInfo(dir);
-                                        if ((di.Attributes & FileAttributes.Hidden) != 0) continue;
-                                        if ((di.Attributes & FileAttributes.ReparsePoint) != 0) continue; // preskoci symlink/junction da ne vrti u krug
-
-                                        string dirName = Path.GetFileName(dir);
-                                        // ako se i ime foldera poklapa sa patternom, dodaj i njega
-                                        if (IsSearchMatch(dirName, pattern, caseSensitive))
+                                        string name = Path.GetFileName(file);
+                                        if (IsSearchMatch(name, pattern, caseSensitive))
                                         {
-                                            lock (foundFiles) { foundFiles.Add(dir); }
+                                            lock (foundFiles) { foundFiles.Add(file); }
                                             count++;
-                                            resForm.BeginInvoke(new Action(() =>
+                                            int cnt = count;
+                                            string f = file;
+                                            ui(() =>
                                             {
                                                 try
                                                 {
-                                                    var item = new ListViewItem("[" + dirName + "]") { Tag = dir };
-                                                    item.SubItems.Add(Path.GetDirectoryName(dir));
-                                                    item.SubItems.Add("<DIR>");
-                                                    item.SubItems.Add(di.LastWriteTime.ToString("dd.MM.yyyy HH:mm"));
+                                                    var fi = new FileInfo(f);
+                                                    var item = new ListViewItem(fi.Name) { Tag = f };
+                                                    item.SubItems.Add(Path.GetDirectoryName(f));
+                                                    item.SubItems.Add(FormatSize(fi.Length));
+                                                    item.SubItems.Add(fi.LastWriteTime.ToString("dd.MM.yyyy HH:mm"));
                                                     lv.Items.Add(item);
-                                                    lblCount.Text = " Pronađeno: " + lv.Items.Count;
+                                                    lblCount.Text = " Pronađeno: " + lv.Items.Count + (cnt >= 1000 ? " (limit 1000)" : "");
                                                 }
                                                 catch { }
-                                            }));
+                                            });
                                         }
-
-                                        stack.Push(dir);
                                     }
                                     catch { }
                                 }
+
+                                if (includeSub)
+                                {
+                                    foreach (var dir in Directory.EnumerateDirectories(currentDir))
+                                    {
+                                        if (token.IsCancellationRequested) break;
+                                        try
+                                        {
+                                            var di = new DirectoryInfo(dir);
+                                            if ((di.Attributes & FileAttributes.Hidden) != 0) continue;
+                                            if ((di.Attributes & FileAttributes.ReparsePoint) != 0) continue; // preskoci symlink/junction
+
+                                            string dirName = Path.GetFileName(dir);
+                                            if (IsSearchMatch(dirName, pattern, caseSensitive))
+                                            {
+                                                lock (foundFiles) { foundFiles.Add(dir); }
+                                                count++;
+                                                string d = dir;
+                                                string dn = dirName;
+                                                DateTime lw = di.LastWriteTime;
+                                                ui(() =>
+                                                {
+                                                    try
+                                                    {
+                                                        var item = new ListViewItem("[" + dn + "]") { Tag = d };
+                                                        item.SubItems.Add(Path.GetDirectoryName(d));
+                                                        item.SubItems.Add("<DIR>");
+                                                        item.SubItems.Add(lw.ToString("dd.MM.yyyy HH:mm"));
+                                                        lv.Items.Add(item);
+                                                        lblCount.Text = " Pronađeno: " + lv.Items.Count;
+                                                    }
+                                                    catch { }
+                                                });
+                                            }
+
+                                            stack.Push(dir);
+                                        }
+                                        catch { }
+                                    }
+                                }
+
+                                string cd = currentDir;
+                                int c2 = count;
+                                ui(() => { lblStatus.Text = " Pretraga: " + cd + " | nađeno: " + c2; });
                             }
-
-                            resForm.BeginInvoke(new Action(() => { lblStatus.Text = " Pretraga: " + currentDir + " | nađeno: " + count; }));
+                            catch { }
                         }
-                        catch { }
-                    }
 
-                    resForm.BeginInvoke(new Action(() =>
+                        ui(() =>
+                        {
+                            int total;
+                            lock (foundFiles) { total = foundFiles.Count; }
+                            lblStatus.Text = " Pretraga završena u " + root + " | ukupno: " + total + " rezultata za '" + pattern + "' (Esc za zatvaranje, Enter/DblClick za lociranje)";
+                            lblCount.Text = " Pronađeno: " + total + (total >= 1000 ? " (limit 1000)" : "") + " | DblClick ili Enter locira fajl u panelu";
+                            if (lv.Items.Count > 0) { lv.Items[0].Selected = true; lv.Items[0].Focused = true; lv.Focus(); }
+                        });
+                    }
+                    catch (Exception ex)
                     {
-                        lblStatus.Text = " Pretraga završena u " + root + " | ukupno: " + foundFiles.Count + " rezultata za '" + pattern + "' (Esc za zatvaranje, Enter/DblClick za lociranje)";
-                        lblCount.Text = " Pronađeno: " + foundFiles.Count + (foundFiles.Count >= 1000 ? " (limit 1000)" : "") + " | DblClick ili Enter locira fajl u panelu";
-                        if (lv.Items.Count > 0) { lv.Items[0].Selected = true; lv.Items[0].Focused = true; lv.Focus(); }
-                    }));
-                }
-                catch (Exception ex)
-                {
-                    try { resForm.BeginInvoke(new Action(() => { lblStatus.Text = " Greška: " + ex.Message; })); } catch { }
-                }
-            });
+                        string msg = ex.Message;
+                        ui(() => { lblStatus.Text = " Greška: " + msg; });
+                    }
+                });
+            };
 
             resForm.ShowDialog(this);
+            resForm.Dispose();
         }
 
         private string FormatSize(long bytes)
@@ -2366,9 +2450,8 @@ btnBrowse.Click += (s, e) =>
             return (bytes / (1024 * 1024)) + " MB";
         }
 
-
         // ========== 7. CTRL+C / CTRL+V / CTRL+X - Clipboard kao Explorer ==========
-        private List<string> _clipboardCutList = null; // ako je Cut, pamtimo da posle Paste obrisemo
+        private List<string> _clipboardCutList = null;
         private bool _isCutOperation = false;
 
         private List<string> GetFilesToClipboard()
@@ -2386,6 +2469,18 @@ btnBrowse.Click += (s, e) =>
             return toCopy;
         }
 
+        // Postavlja listu fajlova + "Preferred DropEffect" (5 = Copy, 2 = Move/Cut). Radi na UI (STA) threadu.
+        private void SetClipboardFiles(List<string> files, bool cut)
+        {
+            var sc = new System.Collections.Specialized.StringCollection();
+            foreach (var f in files) sc.Add(f);
+
+            var data = new DataObject();
+            data.SetFileDropList(sc);
+            data.SetData("Preferred DropEffect", new MemoryStream(new byte[] { (byte)(cut ? 2 : 5), 0, 0, 0 }));
+            Clipboard.SetDataObject(data, true, 10, 100);
+        }
+
         private void ClipboardCopyFiles()
         {
             var files = GetFilesToClipboard();
@@ -2393,37 +2488,10 @@ btnBrowse.Click += (s, e) =>
 
             try
             {
-                // Mora u STA threadu - isto kao i za OpenFileDialog
-                var t = new Thread(() =>
-                {
-                    try
-                    {
-                        var sc = new System.Collections.Specialized.StringCollection();
-                        foreach (var f in files) sc.Add(f);
-                        Clipboard.Clear();
-                        Clipboard.SetFileDropList(sc);
-                        // Oznaci kao Copy operaciju (4 = Copy)
-                        try
-                        {
-                            var data = new DataObject();
-                            data.SetFileDropList(sc);
-                            byte[] moveEffect = new byte[] { 5, 0, 0, 0 }; // 2 = Move, 5 = Copy
-                            // Copy
-                            var ms = new MemoryStream(new byte[] { 5, 0, 0, 0 });
-                            data.SetData("Preferred DropEffect", ms);
-                            Clipboard.SetDataObject(data, true);
-                        }
-                        catch { }
-                    }
-                    catch { }
-                });
-                t.SetApartmentState(ApartmentState.STA);
-                t.Start();
-                t.Join();
+                SetClipboardFiles(files, false);
 
                 _isCutOperation = false;
                 _clipboardCutList = null;
-                // FIX: obriši markirano da ne kopira opet isto
                 ActiveMarked.Clear();
                 ActiveList.Invalidate();
                 UpdateStatus();
@@ -2443,29 +2511,10 @@ btnBrowse.Click += (s, e) =>
 
             try
             {
-                var t = new Thread(() =>
-                {
-                    try
-                    {
-                        var sc = new System.Collections.Specialized.StringCollection();
-                        foreach (var f in files) sc.Add(f);
-                        Clipboard.Clear();
-                        // Za Cut stavljamo DropEffect = Move (2)
-                        var data = new DataObject();
-                        data.SetFileDropList(sc);
-                        var ms = new MemoryStream(new byte[] { 2, 0, 0, 0 }); // 2 = Move
-                        data.SetData("Preferred DropEffect", ms);
-                        Clipboard.SetDataObject(data, true);
-                    }
-                    catch { }
-                });
-                t.SetApartmentState(ApartmentState.STA);
-                t.Start();
-                t.Join();
+                SetClipboardFiles(files, true);
 
                 _isCutOperation = true;
                 _clipboardCutList = files.ToList();
-                // FIX: obriši markirano da ne secka opet isto
                 ActiveMarked.Clear();
                 ActiveList.Invalidate();
                 UpdateStatus();
@@ -2483,43 +2532,37 @@ btnBrowse.Click += (s, e) =>
             try
             {
                 System.Collections.Specialized.StringCollection fileList = null;
-                bool isMove = _isCutOperation;
+                bool isMove = false;
 
                 // Uzmi fajlove iz clipboard-a - radi i za fajlove kopirane iz Win Explorera
-                var t = new Thread(() =>
+                try
                 {
-                    try
+                    if (Clipboard.ContainsFileDropList())
                     {
-                        if (Clipboard.ContainsFileDropList())
+                        fileList = Clipboard.GetFileDropList();
+                        try
                         {
-                            fileList = Clipboard.GetFileDropList();
-                            // Proveri da li je Cut ili Copy
-                            try
+                            var data = Clipboard.GetDataObject();
+                            if (data != null && data.GetDataPresent("Preferred DropEffect"))
                             {
-                                var data = Clipboard.GetDataObject();
-                                if (data != null && data.GetDataPresent("Preferred DropEffect"))
+                                object raw = data.GetData("Preferred DropEffect");
+                                var stream = raw as MemoryStream;
+                                if (stream != null)
                                 {
-                                    var stream = data.GetData("Preferred DropEffect") as MemoryStream;
-                                    if (stream != null)
-                                    {
-                                        byte[] bytes = stream.ToArray();
-                                        if (bytes.Length > 0 && bytes[0] == 2) isMove = true; // Move
-                                    }
-                                    else
-                                    {
-                                        var bytes2 = data.GetData("Preferred DropEffect") as byte[];
-                                        if (bytes2 != null && bytes2.Length > 0 && bytes2[0] == 2) isMove = true;
-                                    }
+                                    byte[] bytes = stream.ToArray();
+                                    if (bytes.Length > 0 && (bytes[0] & 2) != 0 && (bytes[0] & 1) == 0) isMove = true;
+                                }
+                                else
+                                {
+                                    var bytes2 = raw as byte[];
+                                    if (bytes2 != null && bytes2.Length > 0 && (bytes2[0] & 2) != 0 && (bytes2[0] & 1) == 0) isMove = true;
                                 }
                             }
-                            catch { }
                         }
+                        catch { }
                     }
-                    catch { }
-                });
-                t.SetApartmentState(ApartmentState.STA);
-                t.Start();
-                t.Join();
+                }
+                catch { }
 
                 if (fileList == null || fileList.Count == 0)
                 {
@@ -2531,11 +2574,10 @@ btnBrowse.Click += (s, e) =>
                 string destDir = ActiveList == leftList ? leftCurrent : rightCurrent;
                 var srcList = fileList.Cast<string>().ToList();
 
-                // ako je Cut iz naseg programa, koristi _clipboardCutList za proveru da ne pastujes u isti folder
-                if (_isCutOperation && _clipboardCutList != null && _clipboardCutList.Count == srcList.Count)
+                if (isMove)
                 {
-                    // proveri da li je isti folder - ako jeste, nema sta da se radi
-                    bool sameFolder = srcList.All(s => Path.GetDirectoryName(s).Equals(destDir, StringComparison.OrdinalIgnoreCase));
+                    bool sameFolder = srcList.All(s => string.Equals(Path.GetDirectoryName(s), destDir.TrimEnd('\\') + (destDir.EndsWith(":\\") ? "\\" : ""), StringComparison.OrdinalIgnoreCase)
+                                                    || string.Equals(Path.GetDirectoryName(s), destDir, StringComparison.OrdinalIgnoreCase));
                     if (sameFolder)
                     {
                         statusLabel.Text = " Vec si u istom folderu, nema potrebe za Move";
@@ -2556,7 +2598,6 @@ btnBrowse.Click += (s, e) =>
                     {
                         string dest = Path.Combine(destDir, Path.GetFileName(src));
 
-                        // izbegni kopiranje samog sebe
                         if (string.Equals(src, dest, StringComparison.OrdinalIgnoreCase)) continue;
 
                         if (File.Exists(src))
@@ -2602,15 +2643,8 @@ btnBrowse.Click += (s, e) =>
 
                 if (okCount > 0)
                 {
-                    // FIX: ocisti clipboard nakon i Copy i Move da ne pamti i ne kopira opet isto - kao sto si trazio
-                    try
-                    {
-                        var clearThread = new Thread(() => { try { Clipboard.Clear(); } catch { } });
-                        clearThread.SetApartmentState(ApartmentState.STA);
-                        clearThread.Start();
-                        clearThread.Join();
-                    }
-                    catch { }
+                    // ocisti clipboard da ne pamti i ne kopira opet isto
+                    try { Clipboard.Clear(); } catch { }
                     _isCutOperation = false;
                     _clipboardCutList = null;
                     ActiveMarked.Clear();
@@ -2626,7 +2660,6 @@ btnBrowse.Click += (s, e) =>
             }
         }
 
-
         private void DeleteSelected(bool permanent)
         {
             List<string> toDel;
@@ -2637,11 +2670,11 @@ btnBrowse.Click += (s, e) =>
             {
                 if (ActiveList.SelectedItems.Count == 0) return;
                 var sel = ActiveList.SelectedItems[0].Tag as string;
-                if (sel.EndsWith("..")) return;
+                if (string.IsNullOrEmpty(sel) || sel.EndsWith("..")) return;
                 toDel = new List<string> { sel };
             }
 
-            Form delForm = new Form()
+            using (Form delForm = new Form()
             {
                 Width = 600,
                 Height = 400,
@@ -2650,20 +2683,21 @@ btnBrowse.Click += (s, e) =>
                 FormBorderStyle = FormBorderStyle.FixedDialog,
                 MinimizeBox = false,
                 MaximizeBox = false
-            };
+            })
+            {
+                Label lbl = new Label() { Left = 10, Top = 10, Width = 560, Height = 40, Text = permanent ? "TRAJNO obrisati?" : "Poslati u Recycle Bin?" };
+                ListBox lb = new ListBox() { Left = 10, Top = 50, Width = 560, Height = 270 };
+                lb.Items.AddRange(toDel.ToArray());
 
-            Label lbl = new Label() { Left = 10, Top = 10, Width = 560, Height = 40, Text = permanent ? "TRAJNO obrisati?" : "Poslati u Recycle Bin?" };
-            ListBox lb = new ListBox() { Left = 10, Top = 50, Width = 560, Height = 270 };
-            lb.Items.AddRange(toDel.ToArray());
+                Button ok = new Button() { Text = permanent ? "Trajno" : "Recycle", Left = 350, Top = 330, Width = 110, DialogResult = DialogResult.OK, BackColor = permanent ? ColorDeletePermanentBg : ColorDeleteRecycleBg };
+                Button cancel = new Button() { Text = "Otkaži", Left = 470, Top = 330, Width = 100, DialogResult = DialogResult.Cancel };
 
-            Button ok = new Button() { Text = permanent ? "Trajno" : "Recycle", Left = 350, Top = 330, Width = 110, DialogResult = DialogResult.OK, BackColor = permanent ? ColorDeletePermanentBg : ColorDeleteRecycleBg };
-            Button cancel = new Button() { Text = "Otkaži", Left = 470, Top = 330, Width = 100, DialogResult = DialogResult.Cancel };
+                delForm.Controls.AddRange(new Control[] { lbl, lb, ok, cancel });
+                delForm.AcceptButton = ok;
+                delForm.CancelButton = cancel;
 
-            delForm.Controls.AddRange(new Control[] { lbl, lb, ok, cancel });
-            delForm.AcceptButton = ok;
-            delForm.CancelButton = cancel;
-
-            if (delForm.ShowDialog() != DialogResult.OK) return;
+                if (delForm.ShowDialog(this) != DialogResult.OK) return;
+            }
 
             foreach (var p in toDel)
             {
