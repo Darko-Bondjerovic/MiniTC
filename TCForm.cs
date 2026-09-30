@@ -2305,7 +2305,7 @@ namespace MiniTC
             {
                 Label lbl = new Label() { Left = 10, Top = 15, Width = 400, Text = "Traži (npr *.cs , *form* , MiniTC):" };
                 TextBox txt = new TextBox() { Left = 10, Top = 35, Width = 410, Text = "" };
-                CheckBox chkSub = new CheckBox() { Left = 10, Top = 65, Width = 180, Text = "Uključi podfoldere", Checked = true };
+                CheckBox chkSub = new CheckBox() { Left = 10, Top = 65, Width = 180, Text = "Pretraži podfoldere", Checked = true };
                 CheckBox chkCase = new CheckBox() { Left = 200, Top = 65, Width = 180, Text = "Case sensitive", Checked = false };
 
                 Button ok = new Button() { Text = "Traži", Left = 240, Top = 100, Width = 80, DialogResult = DialogResult.OK };
@@ -2352,6 +2352,7 @@ namespace MiniTC
                 Height = 600,
                 Text = "Rezultati pretrage za '" + pattern + "' u " + root + " - DblClick/Enter locira fajl",
                 StartPosition = FormStartPosition.CenterParent,
+                WindowState = FormWindowState.Maximized,
                 MinimizeBox = false,
                 MaximizeBox = true
             };
@@ -2372,15 +2373,35 @@ namespace MiniTC
             lv.Columns.Add("Veličina", 80);
             lv.Columns.Add("Datum", 130);
 
+            // Kolone proporcionalno sirini prozora: Ime 25%, Putanja 50%, Velicina 10%, Datum 15%
+            Action fitColumns = () =>
+            {
+                int w = lv.ClientSize.Width - SystemInformation.VerticalScrollBarWidth;
+                if (w <= 0) return;
+                int c0 = (int)(w * 0.25);
+                int c1 = (int)(w * 0.50);
+                int c2 = (int)(w * 0.10);
+                lv.Columns[0].Width = c0;
+                lv.Columns[1].Width = c1;
+                lv.Columns[2].Width = c2;
+                lv.Columns[3].Width = w - c0 - c1 - c2;
+            };
+            lv.ClientSizeChanged += (s, e) => fitColumns();
+            lv.SizeChanged += (s, e) => fitColumns();
+
             Label lblStatus = new Label() { Dock = DockStyle.Top, Height = 24, BackColor = ColorToolbarBg, ForeColor = ColorStatusFg, Text = " Pretraga u toku: " + root + " za '" + pattern + "'..." };
             Label lblCount = new Label() { Dock = DockStyle.Bottom, Height = 24, BackColor = ColorToolbarBg, ForeColor = ColorAccent, Text = " Pronađeno: 0" };
 
             Panel bottomPanel = new Panel() { Dock = DockStyle.Bottom, Height = 40, BackColor = ColorToolbarBg };
             Button btnGoto = new Button() { Text = "Idi na fajl (Enter)", Left = 10, Top = 8, Width = 140, BackColor = ColorGotoBtnBg, ForeColor = Color.Black };
             Button btnOpen = new Button() { Text = "Otvori", Left = 160, Top = 8, Width = 80 };
+            Button btnSelectAll = new Button() { Text = "Selektuj sve u panelu", Left = 250, Top = 8, Width = 170 };
             Button btnClose = new Button() { Text = "Zatvori (Esc)", Left = 780, Top = 8, Width = 100, DialogResult = DialogResult.Cancel };
-            bottomPanel.Controls.AddRange(new Control[] { btnGoto, btnOpen, btnClose });
+            bottomPanel.Controls.AddRange(new Control[] { btnGoto, btnOpen, btnSelectAll, btnClose });
             resForm.CancelButton = btnClose;
+
+            // Dugme Zatvori uvek uz desnu ivicu (prozor je maximizovan)
+            bottomPanel.Resize += (s, e) => { btnClose.Left = bottomPanel.ClientSize.Width - btnClose.Width - 10; };
 
             resForm.Controls.Add(lv);
             resForm.Controls.Add(bottomPanel);
@@ -2450,6 +2471,36 @@ namespace MiniTC
                     string p = lv.SelectedItems[0].Tag as string;
                     goToFile(p);
                 }
+            };
+
+            // Markira (kao Space) sve nadjene FAJLOVE u panelu iz kog je pretraga pokrenuta, pa skoci na prvi
+            btnSelectAll.Click += (s, e) =>
+            {
+                try
+                {
+                    var files = new List<string>();
+                    lock (foundFiles) { foreach (var f in foundFiles) if (File.Exists(f)) files.Add(f); }
+                    if (files.Count == 0)
+                    {
+                        MessageBox.Show("Nema pronađenih fajlova za selektovanje.");
+                        return;
+                    }
+
+                    var list = ActiveList;
+                    var marked = ActiveMarked;
+                    foreach (var f in files) marked.Add(f);
+
+                    string first = files[0];
+                    LoadFolder(list, list == leftList ? leftPath : rightPath, Path.GetDirectoryName(first), first);
+                    int n = files.Count;
+                    resForm.Close();
+                    list.Focus();
+                    list.Invalidate();
+                    UpdateStatus();
+                    statusLabel.Text = " Selektovano fajlova iz pretrage: " + n;
+                    lastStatus = statusLabel.Text;
+                }
+                catch (Exception ex) { MessageBox.Show("Greška pri selektovanju: " + ex.Message); }
             };
 
             btnOpen.Click += (s, e) =>
