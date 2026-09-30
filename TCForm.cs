@@ -220,6 +220,11 @@ namespace MiniTC
         private TextBox leftPath, rightPath;
         private Label statusLabel;
         private TextBox cmdBox;
+        private Panel cmdPanel;
+        private Button cmdSaveBtn;
+        private List<string> savedCommands = new List<string>();   // pamte se u MiniTC.txt, sekcija [SavedCommands]
+        private int savedCmdIdx = -1;                              // -1 = ne listamo sacuvane komande
+        private string savedCmdDraft = "";                         // ono sto je bilo ukucano pre listanja
         private ToolStrip toolBar;
         private ToolStripComboBox fontCombo;
         private SplitContainer topSplit;
@@ -470,6 +475,26 @@ namespace MiniTC
             };
             cmdBox.KeyDown += CmdBox_KeyDown;
 
+            // Save dugme sa leve strane cmdBox-a - pamti trenutnu komandu u MiniTC.txt
+            cmdSaveBtn = new Button
+            {
+                Text = "Save",
+                Dock = DockStyle.Left,
+                Width = 60,
+                TabStop = false,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = ColorBg,
+                ForeColor = ColorAccent
+            };
+            cmdSaveBtn.FlatAppearance.BorderColor = ColorSplitter;
+            cmdSaveBtn.Click += (s, e) => SaveCurrentCommand();
+            new ToolTip().SetToolTip(cmdSaveBtn, "Zapamti komandu iz polja (MiniTC.txt). Strelica gore/dole u polju lista sacuvane komande.");
+
+            cmdBox.Dock = DockStyle.Fill;
+            cmdPanel = new Panel { Dock = DockStyle.Bottom, Height = Math.Max(26, cmdBox.PreferredHeight) };
+            cmdPanel.Controls.Add(cmdBox);      // Fill prvo...
+            cmdPanel.Controls.Add(cmdSaveBtn);  // ...pa Left, da dugme zauzme levu stranu
+
             var cmdLine = new Label { Dock = DockStyle.Bottom, Height = 2, BackColor = ColorSplitter };
             statusLabel = new Label { Dock = DockStyle.Bottom, Height = 28, BackColor = ColorBg, ForeColor = ColorStatusFg };
 
@@ -478,7 +503,7 @@ namespace MiniTC
 
             Controls.Add(topSplit);
             Controls.Add(cmdLine);
-            Controls.Add(cmdBox);
+            Controls.Add(cmdPanel);
             Controls.Add(statusLabel);
             Controls.Add(toolBar);
 
@@ -554,6 +579,7 @@ namespace MiniTC
             {
                 compareToolPath = "";
                 compareToolParams = "";
+                savedCommands.Clear();
 
                 if (!File.Exists(ConfigFilePath))
                 {
@@ -587,6 +613,18 @@ namespace MiniTC
                     if (line.Equals("[CompareTool]", StringComparison.OrdinalIgnoreCase) || line.Equals("CompareTool", StringComparison.OrdinalIgnoreCase))
                     {
                         mode = 3;
+                        continue;
+                    }
+                    if (line.Equals("[SavedCommands]", StringComparison.OrdinalIgnoreCase))
+                    {
+                        mode = 4;
+                        continue;
+                    }
+
+                    if (mode == 4)
+                    {
+                        // svaka linija je jedna sacuvana komanda
+                        if (!savedCommands.Contains(line)) savedCommands.Add(line);
                         continue;
                     }
 
@@ -662,6 +700,9 @@ namespace MiniTC
                 outLines.Add("[CompareTool]");
                 outLines.Add("Path=" + compareToolPath);
                 outLines.Add("Params=" + compareToolParams);
+                outLines.Add("");
+                outLines.Add("[SavedCommands]");
+                foreach (var c in savedCommands) outLines.Add(c);
 
                 File.WriteAllLines(ConfigFilePath, outLines);
             }
@@ -846,9 +887,66 @@ namespace MiniTC
             return true;
         }
 
+        // Zapamti komandu iz cmdBox-a u MiniTC.txt
+        private void SaveCurrentCommand()
+        {
+            string cmd = cmdBox.Text.Trim();
+            if (cmd.Length == 0)
+            {
+                statusLabel.Text = " Save: polje za komandu je prazno";
+            }
+            else if (savedCommands.Contains(cmd))
+            {
+                statusLabel.Text = " Save: komanda vec postoji u MiniTC.txt";
+            }
+            else
+            {
+                savedCommands.Add(cmd);
+                SaveTabsToTxt();
+                statusLabel.Text = " Sacuvano u MiniTC.txt: " + cmd;
+            }
+            lastStatus = statusLabel.Text;
+            cmdBox.Focus();
+            cmdBox.SelectionStart = cmdBox.TextLength;
+        }
+
+        // Strelica gore/dole u cmdBox-u lista sacuvane komande
+        private void NavigateSavedCommands(bool up)
+        {
+            if (savedCommands.Count == 0) return;
+
+            if (savedCmdIdx == -1)
+            {
+                if (!up) return;
+                savedCmdDraft = cmdBox.Text;
+                savedCmdIdx = savedCommands.Count - 1;
+            }
+            else if (up)
+            {
+                if (savedCmdIdx > 0) savedCmdIdx--;
+            }
+            else
+            {
+                savedCmdIdx++;
+                if (savedCmdIdx >= savedCommands.Count) savedCmdIdx = -1;
+            }
+
+            cmdBox.Text = savedCmdIdx == -1 ? savedCmdDraft : savedCommands[savedCmdIdx];
+            cmdBox.SelectionStart = cmdBox.TextLength;
+        }
+
         private void CmdBox_KeyDown(object sender, KeyEventArgs e)
         {
+            if (e.KeyCode == Keys.Up || e.KeyCode == Keys.Down)
+            {
+                NavigateSavedCommands(e.KeyCode == Keys.Up);
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                return;
+            }
+
             if (e.KeyCode != Keys.Enter) return;
+            savedCmdIdx = -1;
 
             string cmd = cmdBox.Text.Trim();
             if (string.IsNullOrWhiteSpace(cmd)) return;
@@ -983,18 +1081,52 @@ namespace MiniTC
             catch { }
         }
 
+        // Vraca TextBox (cmdBox, path boxevi ili bilo koji drugi) koji trenutno ima fokus, ili null.
+        private TextBoxBase GetFocusedTextBox()
+        {
+            if (cmdBox != null && cmdBox.Focused) return cmdBox;
+            if (leftPath != null && leftPath.Focused) return leftPath;
+            if (rightPath != null && rightPath.Focused) return rightPath;
+
+            // Spusti se kroz ugnjezdene ContainerControl-e (npr. SplitContainer) do pravog fokusiranog kontrola
+            Control c = this.ActiveControl;
+            while (c is ContainerControl)
+            {
+                var next = ((ContainerControl)c).ActiveControl;
+                if (next == null || next == c) break;
+                c = next;
+            }
+            return c as TextBoxBase;
+        }
+
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
             // kada kucas u donjem edit boxu (cmdBox) ili u path boxevima, disable shortcutove
+            // NAPOMENA: this.ActiveControl vraca SplitContainer (ContainerControl) kad je fokus u path boxu,
+            // zato koristimo GetFocusedTextBox() koji pouzdano nalazi pravi fokusirani TextBox.
+            var focusedTb = GetFocusedTextBox();
             var focused = this.ActiveControl;
-            bool isTyping = focused is TextBoxBase || focused is ComboBox;
-            if (isTyping || (cmdBox != null && cmdBox.Focused) || (leftPath != null && leftPath.Focused) || (rightPath != null && rightPath.Focused))
+            bool isTyping = focusedTb != null || focused is ComboBox;
+            if (isTyping)
             {
                 if (keyData == Keys.Space || keyData == Keys.Delete || keyData == (Keys.Shift | Keys.Delete) || keyData == Keys.Escape)
                     return base.ProcessCmdKey(ref msg, keyData);
 
                 if (isTyping && (keyData == Keys.Tab || keyData == (Keys.Control | Keys.Left) || keyData == (Keys.Control | Keys.Right)))
                     return base.ProcessCmdKey(ref msg, keyData);
+
+                // Ctrl+C / Ctrl+X / Ctrl+V (i Ctrl+Insert / Shift+Insert) moraju da rade nad TEKSTOM u cmdBox-u i path boxevima,
+                // a ne da se preusmere na kopiranje fajlova iz panela.
+                if (focusedTb != null && (keyData == (Keys.Control | Keys.C) || keyData == (Keys.Control | Keys.X) || keyData == (Keys.Control | Keys.V) ||
+                                          keyData == (Keys.Control | Keys.Insert) || keyData == (Keys.Shift | Keys.Insert)))
+                    return base.ProcessCmdKey(ref msg, keyData);
+
+                // Ctrl+A - selektuj sav tekst u polju (ne selektuj sve fajlove u panelu)
+                if (focusedTb != null && keyData == (Keys.Control | Keys.A))
+                {
+                    focusedTb.SelectAll();
+                    return true;
+                }
             }
 
             if (keyData == Keys.F3)
@@ -1152,6 +1284,8 @@ namespace MiniTC
             statusLabel.Font = uiFont;
             toolBar.Font = uiFont;
             cmdBox.Font = uiFont;
+            cmdSaveBtn.Font = uiFont;
+            cmdPanel.Height = Math.Max(26, cmdBox.PreferredHeight);
 
             ResizeColumns(leftList);
             ResizeColumns(rightList);
@@ -1621,7 +1755,7 @@ namespace MiniTC
         {
             // ako kucas u cmdBox ili path boxevima, ne hvataj Alt+slovo i ostale precice
             var focused = this.ActiveControl;
-            bool isTyping = focused is TextBoxBase || focused is ComboBox || (cmdBox != null && cmdBox.Focused) || (leftPath != null && leftPath.Focused) || (rightPath != null && rightPath.Focused);
+            bool isTyping = GetFocusedTextBox() != null || focused is ComboBox;
             if (isTyping)
             {
                 return;
