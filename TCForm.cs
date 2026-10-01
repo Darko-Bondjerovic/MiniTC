@@ -47,6 +47,147 @@ namespace MiniTC
         }
     }
 
+    // ========== Dark tema (ista paleta kao MiniDiff) ==========
+    public class DarkColorTable : ProfessionalColorTable
+    {
+        static readonly Color bg = Color.FromArgb(35, 35, 38);
+        static readonly Color menuBg = Color.FromArgb(45, 45, 48);
+        static readonly Color hover = Color.FromArgb(60, 60, 65);
+        static readonly Color border = Color.FromArgb(60, 60, 60);
+        static readonly Color blue = Color.FromArgb(0, 122, 204);
+        static readonly Color green = Color.FromArgb(16, 185, 129);
+
+        public override Color ToolStripDropDownBackground { get { return menuBg; } }
+        public override Color ImageMarginGradientBegin { get { return menuBg; } }
+        public override Color ImageMarginGradientMiddle { get { return menuBg; } }
+        public override Color ImageMarginGradientEnd { get { return menuBg; } }
+        public override Color MenuBorder { get { return border; } }
+        public override Color MenuItemBorder { get { return blue; } }
+        public override Color MenuItemSelected { get { return hover; } }
+        public override Color MenuItemSelectedGradientBegin { get { return hover; } }
+        public override Color MenuItemSelectedGradientEnd { get { return hover; } }
+        public override Color MenuItemPressedGradientBegin { get { return menuBg; } }
+        public override Color MenuItemPressedGradientMiddle { get { return menuBg; } }
+        public override Color MenuItemPressedGradientEnd { get { return menuBg; } }
+        public override Color MenuStripGradientBegin { get { return bg; } }
+        public override Color MenuStripGradientEnd { get { return bg; } }
+        public override Color ToolStripGradientBegin { get { return bg; } }
+        public override Color ToolStripGradientMiddle { get { return bg; } }
+        public override Color ToolStripGradientEnd { get { return bg; } }
+        public override Color ToolStripBorder { get { return bg; } }
+        public override Color ToolStripContentPanelGradientBegin { get { return bg; } }
+        public override Color ToolStripContentPanelGradientEnd { get { return bg; } }
+        public override Color ToolStripPanelGradientBegin { get { return bg; } }
+        public override Color ToolStripPanelGradientEnd { get { return bg; } }
+        public override Color OverflowButtonGradientBegin { get { return bg; } }
+        public override Color OverflowButtonGradientMiddle { get { return bg; } }
+        public override Color OverflowButtonGradientEnd { get { return bg; } }
+        public override Color ButtonSelectedBorder { get { return border; } }
+        public override Color ButtonSelectedGradientBegin { get { return hover; } }
+        public override Color ButtonSelectedGradientMiddle { get { return hover; } }
+        public override Color ButtonSelectedGradientEnd { get { return hover; } }
+        public override Color ButtonSelectedHighlight { get { return hover; } }
+        public override Color ButtonPressedBorder { get { return blue; } }
+        public override Color ButtonPressedGradientBegin { get { return blue; } }
+        public override Color ButtonPressedGradientMiddle { get { return blue; } }
+        public override Color ButtonPressedGradientEnd { get { return blue; } }
+        public override Color ButtonPressedHighlight { get { return blue; } }
+        public override Color ButtonCheckedGradientBegin { get { return green; } }
+        public override Color ButtonCheckedGradientMiddle { get { return green; } }
+        public override Color ButtonCheckedGradientEnd { get { return green; } }
+        public override Color ButtonCheckedHighlight { get { return green; } }
+        public override Color CheckBackground { get { return blue; } }
+        public override Color CheckSelectedBackground { get { return blue; } }
+        public override Color CheckPressedBackground { get { return blue; } }
+        public override Color SeparatorDark { get { return border; } }
+        public override Color SeparatorLight { get { return border; } }
+        public override Color GripDark { get { return border; } }
+        public override Color GripLight { get { return border; } }
+    }
+
+    public class DarkRenderer : ToolStripProfessionalRenderer
+    {
+        public DarkRenderer() : base(new DarkColorTable()) { RoundedEdges = false; }
+
+        protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+        {
+            e.TextColor = e.Item.Enabled ? Color.White : Color.Gray;
+            base.OnRenderItemText(e);
+        }
+
+        protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)
+        {
+            e.ArrowColor = Color.White;
+            base.OnRenderArrow(e);
+        }
+    }
+
+    public static class DarkTheme
+    {
+        public static readonly Color Bg = Color.FromArgb(30, 30, 30);
+        public static readonly Color Input = Color.FromArgb(60, 60, 60);
+        public static readonly Color Blue = Color.FromArgb(0, 122, 204);
+        public static readonly Color Grey = Color.FromArgb(80, 80, 80);
+
+        [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+        private static extern int SetWindowTheme(IntPtr hWnd, string pszSubAppName, string pszSubIdList);
+
+        // Tamni scrollbar (Windows 10 1809+ / 11); na starijim sistemima se samo ignorise
+        public static void DarkScroll(Control c)
+        {
+            Action a = () => { try { SetWindowTheme(c.Handle, "DarkMode_Explorer", null); } catch { } };
+            if (c.IsHandleCreated) a();
+            c.HandleCreated += (s, e) => a();
+        }
+
+        // Stilizuje dijalog kao Diff program: tamna pozadina, Consolas, flat dugmad, tamna polja za unos
+        public static void Apply(Control root)
+        {
+            var form = root as Form;
+            if (form != null)
+            {
+                form.BackColor = Bg;
+                form.ForeColor = Color.White;
+                form.Font = new Font("Consolas", 9f);
+            }
+            Walk(root);
+        }
+
+        private static void Walk(Control parent)
+        {
+            foreach (Control c in parent.Controls)
+            {
+                if (c is Button)
+                {
+                    var b = (Button)c;
+                    b.FlatStyle = FlatStyle.Flat;
+                    if (b.ForeColor == SystemColors.ControlText) b.ForeColor = Color.White;
+                    if (b.BackColor == SystemColors.Control)
+                        b.BackColor = (b.DialogResult == DialogResult.OK || b.DialogResult == DialogResult.Yes) ? Blue : Grey;
+                }
+                else if (c is TextBox)
+                {
+                    if (c.BackColor == SystemColors.Window) c.BackColor = Input;
+                    if (c.ForeColor == SystemColors.WindowText) c.ForeColor = Color.White;
+                    ((TextBox)c).BorderStyle = BorderStyle.FixedSingle;
+                }
+                else if (c is ListBox)
+                {
+                    c.BackColor = Color.FromArgb(25, 25, 25);
+                    c.ForeColor = Color.White;
+                    ((ListBox)c).BorderStyle = BorderStyle.FixedSingle;
+                    DarkScroll(c);
+                }
+                else if (c is Label || c is CheckBox || c is RadioButton || c is GroupBox)
+                {
+                    if (c.ForeColor == SystemColors.ControlText) c.ForeColor = Color.White;
+                }
+
+                if (c.HasChildren) Walk(c);
+            }
+        }
+    }
+
     public class Prompt
     {
         public static string Show(string text, string caption, string defaultValue = "")
@@ -70,6 +211,7 @@ namespace MiniTC
                 prompt.Controls.AddRange(new Control[] { textBox, confirmation, cancel, textLabel });
                 prompt.AcceptButton = confirmation;
                 prompt.CancelButton = cancel;
+                DarkTheme.Apply(prompt);
 
                 return prompt.ShowDialog() == DialogResult.OK ? textBox.Text : "";
             }
@@ -189,30 +331,30 @@ namespace MiniTC
         // ================================================================
 
         // ========== BOJE - PROMENI OVDE AKO TREBA ==========
-        private static readonly Color ColorBg = Color.FromArgb(30, 30, 30);//(20, 15, 15);         // pozadina panela/liste
-        private static readonly Color ColorFg = Color.White;                 // obicno slovo u listi
-        private static readonly Color ColorAccent = Color.Cyan;              // path box, drive combo, header slova
-        private static readonly Color ColorToolbarBg = Color.FromArgb(30, 30, 30);
+        private static readonly Color ColorBg = Color.FromArgb(30, 30, 30); // pozadina panela/liste (isto kao Diff)
+        private static readonly Color ColorFg = Color.FromArgb(220, 220, 220); // obicno slovo u listi (isto kao tekst u Diff editoru)
+        private static readonly Color ColorAccent = Color.FromArgb(0, 122, 204);   // plava iz Diff-a (dugmad, selekcija)
+        private static readonly Color ColorToolbarBg = Color.FromArgb(35, 35, 38);
         private static readonly Color ColorToolbarFg = Color.White;
-        private static readonly Color ColorSplitter = Color.DimGray;
-        private static readonly Color ColorTabBg = Color.FromArgb(20, 20, 20);
-        private static readonly Color ColorCmdBg = Color.Black;
-        private static readonly Color ColorCmdFg = Color.Yellow;
-        private static readonly Color ColorStatusFg = Color.Lime;
-        private static readonly Color ColorTabActiveBg = Color.Yellow;
-        private static readonly Color ColorTabActiveFg = Color.Black;
-        private static readonly Color ColorTabInactiveBg = Color.FromArgb(50, 50, 50);
+        private static readonly Color ColorSplitter = Color.FromArgb(60, 60, 60);
+        private static readonly Color ColorTabBg = Color.FromArgb(35, 35, 38);
+        private static readonly Color ColorCmdBg = Color.FromArgb(60, 60, 60);   // isto kao TextBox u Diff-u
+        private static readonly Color ColorCmdFg = Color.White;
+        private static readonly Color ColorStatusFg = Color.Silver;
+        private static readonly Color ColorTabActiveBg = Color.FromArgb(0, 122, 204);
+        private static readonly Color ColorTabActiveFg = Color.White;
+        private static readonly Color ColorTabInactiveBg = Color.FromArgb(60, 60, 65);
         private static readonly Color ColorTabInactiveFg = Color.White;
-        private static readonly Color ColorHeaderBg = Color.FromArgb(55, 55, 55);
-        private static readonly Color ColorHeaderFg = Color.Cyan;
-        private static readonly Color ColorSelBg = Color.White;              // pozadina fokusirane stavke
-        private static readonly Color ColorSelFg = Color.Black;              // slovo fokusirane stavke
-        private static readonly Color ColorMarkedFg = Color.Red;             // slovo obelezenog (markiranog) fajla
-        private static readonly Color ColorShellOnBg = Color.DarkGreen;
+        private static readonly Color ColorHeaderBg = Color.FromArgb(45, 45, 48);
+        private static readonly Color ColorHeaderFg = Color.FromArgb(220, 220, 220);
+        private static readonly Color ColorSelBg = Color.FromArgb(0, 122, 204);  // pozadina fokusirane stavke
+        private static readonly Color ColorSelFg = Color.White;                  // slovo fokusirane stavke
+        private static readonly Color ColorMarkedFg = Color.FromArgb(255, 120, 120); // slovo obelezenog (markiranog) fajla
+        private static readonly Color ColorShellOnBg = Color.FromArgb(16, 185, 129);
         private static readonly Color ColorHintFg = Color.Gray;
-        private static readonly Color ColorGotoBtnBg = Color.Yellow;
-        private static readonly Color ColorDeletePermanentBg = Color.Red;
-        private static readonly Color ColorDeleteRecycleBg = Color.Orange;
+        private static readonly Color ColorGotoBtnBg = Color.FromArgb(16, 185, 129);
+        private static readonly Color ColorDeletePermanentBg = Color.FromArgb(170, 50, 50);
+        private static readonly Color ColorDeleteRecycleBg = Color.FromArgb(190, 110, 30);
         // =====================================================
 
         private ListView leftList, rightList;
@@ -365,6 +507,8 @@ namespace MiniTC
             WindowState = FormWindowState.Maximized;
             KeyPreview = true;
             BackColor = ColorBg;
+            Font = new Font("Consolas", 9.5f);          // isti UI font kao MiniDiff
+            ToolStripManager.Renderer = new DarkRenderer();   // tamni toolbar i context meniji
             DoubleBuffered = true;
 
             toolBar = new ToolStrip
@@ -397,6 +541,9 @@ namespace MiniTC
             fontCombo = new ToolStripComboBox { Width = 60 };
             fontCombo.Items.AddRange(new object[] { "10", "12", "14", "16", "18", "20", "22", "26", "32" });
             fontCombo.Text = "14";
+            fontCombo.ComboBox.BackColor = ColorCmdBg;
+            fontCombo.ComboBox.ForeColor = Color.White;
+            fontCombo.ComboBox.FlatStyle = FlatStyle.Flat;
             fontCombo.SelectedIndexChanged += (s, e) => ChangeFont();
             toolBar.Items.Add(fontCombo);
             toolBar.Items.Add(new ToolStripSeparator());
@@ -419,11 +566,11 @@ namespace MiniTC
                 SplitterWidth = 6
             };
 
-            leftDrive = new ComboBox { Dock = DockStyle.Top, DropDownStyle = ComboBoxStyle.DropDownList, TabStop = false, BackColor = ColorBg, ForeColor = ColorAccent, FlatStyle = FlatStyle.Flat };
-            rightDrive = new ComboBox { Dock = DockStyle.Top, DropDownStyle = ComboBoxStyle.DropDownList, TabStop = false, BackColor = ColorBg, ForeColor = ColorAccent, FlatStyle = FlatStyle.Flat };
+            leftDrive = new ComboBox { Dock = DockStyle.Top, DropDownStyle = ComboBoxStyle.DropDownList, TabStop = false, BackColor = ColorCmdBg, ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+            rightDrive = new ComboBox { Dock = DockStyle.Top, DropDownStyle = ComboBoxStyle.DropDownList, TabStop = false, BackColor = ColorCmdBg, ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
 
-            leftPath = new TextBox { Dock = DockStyle.Top, BackColor = ColorBg, ForeColor = ColorAccent, BorderStyle = BorderStyle.FixedSingle };
-            rightPath = new TextBox { Dock = DockStyle.Top, BackColor = ColorBg, ForeColor = ColorAccent, BorderStyle = BorderStyle.FixedSingle };
+            leftPath = new TextBox { Dock = DockStyle.Top, BackColor = ColorCmdBg, ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle };
+            rightPath = new TextBox { Dock = DockStyle.Top, BackColor = ColorCmdBg, ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle };
 
             leftPath.KeyDown += PathBox_KeyDown;
             rightPath.KeyDown += PathBox_KeyDown;
@@ -448,6 +595,8 @@ namespace MiniTC
 
             leftList = CreateFileList();
             rightList = CreateFileList();
+            DarkTheme.DarkScroll(leftList);
+            DarkTheme.DarkScroll(rightList);
 
             var leftPanel = new Panel { Dock = DockStyle.Fill, BackColor = ColorBg };
             leftPanel.Controls.Add(leftList);
@@ -478,15 +627,14 @@ namespace MiniTC
             // Save dugme sa leve strane cmdBox-a - pamti trenutnu komandu u MiniTC.txt
             cmdSaveBtn = new Button
             {
-                Text = "Save",
+                Text = "\U0001F4BE Save",
                 Dock = DockStyle.Left,
-                Width = 60,
+                Width = 80,
                 TabStop = false,
                 FlatStyle = FlatStyle.Flat,
-                BackColor = ColorBg,
-                ForeColor = ColorAccent
+                BackColor = ColorAccent,
+                ForeColor = Color.White
             };
-            cmdSaveBtn.FlatAppearance.BorderColor = ColorSplitter;
             cmdSaveBtn.Click += (s, e) => SaveCurrentCommand();
             new ToolTip().SetToolTip(cmdSaveBtn, "Zapamti komandu iz polja (MiniTC.txt). Strelica gore/dole u polju lista sacuvane komande.");
 
@@ -496,7 +644,7 @@ namespace MiniTC
             cmdPanel.Controls.Add(cmdSaveBtn);  // ...pa Left, da dugme zauzme levu stranu
 
             var cmdLine = new Label { Dock = DockStyle.Bottom, Height = 2, BackColor = ColorSplitter };
-            statusLabel = new Label { Dock = DockStyle.Bottom, Height = 28, BackColor = ColorBg, ForeColor = ColorStatusFg };
+            statusLabel = new Label { Dock = DockStyle.Bottom, Height = 26, BackColor = ColorToolbarBg, ForeColor = ColorStatusFg, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(4, 0, 0, 0) };
 
             EnableDoubleBuffer(statusLabel);
             EnableDoubleBuffer(cmdBox);
@@ -1338,7 +1486,7 @@ namespace MiniTC
 
             var oldFont = listFont;
             listFont = new Font("Consolas", size, FontStyle.Regular);
-            Font uiFont = new Font("Consolas", size, FontStyle.Regular);
+            Font uiFont = new Font("Consolas", 9.5f, FontStyle.Regular);   // okvir programa je uvek 9.5 kao u Diff-u; "Font" combo menja samo listu i cmd
 
             leftList.Font = listFont;
             rightList.Font = listFont;
@@ -1348,7 +1496,7 @@ namespace MiniTC
             rightDrive.Font = uiFont;
             statusLabel.Font = uiFont;
             toolBar.Font = uiFont;
-            cmdBox.Font = uiFont;
+            cmdBox.Font = listFont;
             cmdSaveBtn.Font = uiFont;
             cmdPanel.Height = Math.Max(26, cmdBox.PreferredHeight);
 
@@ -2309,6 +2457,7 @@ namespace MiniTC
                 prompt.AcceptButton = confirmation;
                 prompt.CancelButton = cancel;
 
+                DarkTheme.Apply(prompt);
                 prompt.Shown += (s, e) =>
                 {
                     textBox.Focus();
@@ -2366,6 +2515,7 @@ namespace MiniTC
                 f.Controls.AddRange(new Control[] { lblPath, txtPath, btnBrowse, lblParams, txtParams, lblHint, ok, cancel });
                 f.AcceptButton = ok;
                 f.CancelButton = cancel;
+                DarkTheme.Apply(f);
 
                 if (f.ShowDialog(this) == DialogResult.OK)
                 {
@@ -2492,6 +2642,7 @@ namespace MiniTC
                 dlg.Controls.AddRange(new Control[] { lbl, txt, chkSub, chkCase, ok, cancel });
                 dlg.AcceptButton = ok;
                 dlg.CancelButton = cancel;
+                DarkTheme.Apply(dlg);
                 dlg.Shown += (s, e) => txt.Focus();
 
                 if (dlg.ShowDialog(this) == DialogResult.OK)
@@ -2568,13 +2719,13 @@ namespace MiniTC
             lv.SizeChanged += (s, e) => fitColumns();
 
             Label lblStatus = new Label() { Dock = DockStyle.Top, Height = 24, BackColor = ColorToolbarBg, ForeColor = ColorStatusFg, Text = " Pretraga u toku: " + root + " za '" + pattern + "'..." };
-            Label lblCount = new Label() { Dock = DockStyle.Bottom, Height = 24, BackColor = ColorToolbarBg, ForeColor = ColorAccent, Text = " Pronađeno: 0" };
+            Label lblCount = new Label() { Dock = DockStyle.Bottom, Height = 24, BackColor = ColorToolbarBg, ForeColor = ColorStatusFg, Text = " Pronađeno: 0" };
 
             Panel bottomPanel = new Panel() { Dock = DockStyle.Bottom, Height = 40, BackColor = ColorToolbarBg };
-            Button btnGoto = new Button() { Text = "Idi na fajl (Enter)", Left = 10, Top = 8, Width = 140, BackColor = ColorGotoBtnBg, ForeColor = Color.Black };
-            Button btnOpen = new Button() { Text = "Otvori", Left = 160, Top = 8, Width = 80 };
-            Button btnSelectAll = new Button() { Text = "Selektuj sve u panelu", Left = 250, Top = 8, Width = 170 };
-            Button btnClose = new Button() { Text = "Zatvori (Esc)", Left = 780, Top = 8, Width = 100, DialogResult = DialogResult.Cancel };
+            Button btnGoto = new Button() { Text = "Idi na fajl (Enter)", Left = 10, Top = 8, Width = 170, BackColor = ColorGotoBtnBg, ForeColor = Color.White };
+            Button btnOpen = new Button() { Text = "Otvori", Left = 190, Top = 8, Width = 90 };
+            Button btnSelectAll = new Button() { Text = "Selektuj sve u panelu", Left = 290, Top = 8, Width = 200 };
+            Button btnClose = new Button() { Text = "Zatvori (Esc)", Left = 780, Top = 8, Width = 130, DialogResult = DialogResult.Cancel };
             bottomPanel.Controls.AddRange(new Control[] { btnGoto, btnOpen, btnSelectAll, btnClose });
             resForm.CancelButton = btnClose;
 
@@ -2585,6 +2736,8 @@ namespace MiniTC
             resForm.Controls.Add(bottomPanel);
             resForm.Controls.Add(lblCount);
             resForm.Controls.Add(lblStatus);
+            DarkTheme.Apply(resForm);
+            DarkTheme.DarkScroll(lv);
 
             var foundFiles = new List<string>();
             var cts = new CancellationTokenSource();
@@ -3058,6 +3211,7 @@ namespace MiniTC
                 delForm.Controls.AddRange(new Control[] { lbl, lb, ok, cancel });
                 delForm.AcceptButton = ok;
                 delForm.CancelButton = cancel;
+                DarkTheme.Apply(delForm);
 
                 if (delForm.ShowDialog(this) != DialogResult.OK) return;
             }
