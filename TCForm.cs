@@ -680,7 +680,61 @@ namespace MiniTC
             }
         }
 
-        private void SaveTabsToTxt()
+        private string lastConfigError = "";
+
+        // Cita samo sekciju [SavedCommands] iz MiniTC.txt (ono sto je TRENUTNO u fajlu)
+        private List<string> ReadSavedCommandsFromFile()
+        {
+            var res = new List<string>();
+            try
+            {
+                if (!File.Exists(ConfigFilePath)) return res;
+                bool inSection = false;
+                foreach (var raw in File.ReadAllLines(ConfigFilePath))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0) continue;
+                    if (line.Equals("[SavedCommands]", StringComparison.OrdinalIgnoreCase)) { inSection = true; continue; }
+                    if (line.Equals("[LeviPanel]", StringComparison.OrdinalIgnoreCase) || line.Equals("[DesniPanel]", StringComparison.OrdinalIgnoreCase) ||
+                        line.Equals("[CompareTool]", StringComparison.OrdinalIgnoreCase)) { inSection = false; continue; }
+                    if (inSection && !res.Contains(line)) res.Add(line);
+                }
+            }
+            catch { }
+            return res;
+        }
+
+        // Spaja komande iz fajla u memoriju (npr. dodate iz druge instance programa)
+        private void MergeSavedCommandsFromFile()
+        {
+            foreach (var c in ReadSavedCommandsFromFile())
+                if (!savedCommands.Contains(c)) savedCommands.Add(c);
+        }
+
+        // Pise fajl sigurno: prvo u .tmp pa kopira preko, sa par pokusaja ako je fajl trenutno zakljucan
+        private bool WriteConfigFile(List<string> lines)
+        {
+            string tmp = ConfigFilePath + ".tmp";
+            for (int attempt = 0; attempt < 4; attempt++)
+            {
+                try
+                {
+                    File.WriteAllLines(tmp, lines);
+                    File.Copy(tmp, ConfigFilePath, true);
+                    try { File.Delete(tmp); } catch { }
+                    lastConfigError = "";
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    lastConfigError = ex.Message;
+                    System.Threading.Thread.Sleep(80);
+                }
+            }
+            return false;
+        }
+
+        private bool SaveTabsToTxt()
         {
             try
             {
@@ -702,11 +756,19 @@ namespace MiniTC
                 outLines.Add("Params=" + compareToolParams);
                 outLines.Add("");
                 outLines.Add("[SavedCommands]");
+
+                // Ne gazimo komande koje su u fajlu a nisu u memoriji (druga instanca / stariji exe koji ne zna za [SavedCommands]):
+                // uzmi sve iz fajla, dodaj one iz memorije kojih nema, pa upisi uniju.
+                MergeSavedCommandsFromFile();
                 foreach (var c in savedCommands) outLines.Add(c);
 
-                File.WriteAllLines(ConfigFilePath, outLines);
+                return WriteConfigFile(outLines);
             }
-            catch { }
+            catch (Exception ex)
+            {
+                lastConfigError = ex.Message;
+                return false;
+            }
         }
 
         private void RenderTabs()
@@ -891,6 +953,7 @@ namespace MiniTC
         private void SaveCurrentCommand()
         {
             string cmd = cmdBox.Text.Trim();
+            MergeSavedCommandsFromFile();   // vidi i komande koje je mozda dodala druga instanca
             if (cmd.Length == 0)
             {
                 statusLabel.Text = " Save: polje za komandu je prazno";
@@ -902,8 +965,10 @@ namespace MiniTC
             else
             {
                 savedCommands.Add(cmd);
-                SaveTabsToTxt();
-                statusLabel.Text = " Sacuvano u MiniTC.txt: " + cmd;
+                if (SaveTabsToTxt())
+                    statusLabel.Text = " Sacuvano u MiniTC.txt (" + savedCommands.Count + " komandi): " + cmd;
+                else
+                    statusLabel.Text = " GRESKA: ne mogu da upisem u " + ConfigFilePath + " - " + lastConfigError;
             }
             lastStatus = statusLabel.Text;
             cmdBox.Focus();
@@ -1685,6 +1750,119 @@ namespace MiniTC
         }
 
         private string lastStatus = "";
+
+        // ========== Osvezavanje panela kada aplikacija ponovo dobije fokus ==========
+        private bool _firstActivationDone = false;
+        private bool _refreshingOnActivate = false;
+
+        protected override void OnActivated(EventArgs e)
+        {
+            base.OnActivated(e);
+            if (!_firstActivationDone) { _firstActivationDone = true; return; }   // prvo otvaranje - vec ucitano
+            RefreshPanelsKeepState();
+        }
+
+        // Najbliza postojeca putanja (ako je folder obrisan van programa, idemo na prvog postojeceg roditelja)
+        private string ResolveExistingFolder(string p)
+        {
+            try
+            {
+                while (!string.IsNullOrEmpty(p) && !Directory.Exists(p))
+                {
+                    string parent = Path.GetDirectoryName(p);
+                    if (string.IsNullOrEmpty(parent) || parent == p) return null;
+                    p = parent;
+                }
+            }
+            catch { return null; }
+            return p;
+        }
+
+        private void RefreshPanelsKeepState()
+        {
+            if (_refreshingOnActivate) return;
+            if (leftList == null || rightList == null || WindowState == FormWindowState.Minimized) return;
+            _refreshingOnActivate = true;
+            try
+            {
+                // zapamti sta je bilo fokusirano (da ne ukrademo fokus iz cmdBox-a / path boxa)
+                Control prevFocus = this.ActiveControl;
+                while (prevFocus is ContainerControl)
+                {
+                    var next = ((ContainerControl)prevFocus).ActiveControl;
+                    if (next == null || next == prevFocus) break;
+                    prevFocus = next;
+                }
+                var prevTb = prevFocus as TextBoxBase;
+                int selStart = prevTb != null ? prevTb.SelectionStart : 0;
+                int selLen = prevTb != null ? prevTb.SelectionLength : 0;
+                var prevActive = lastActive;
+
+                // komande koje je mozda dodala druga instanca programa
+                MergeSavedCommandsFromFile();
+
+                // markirani fajlovi koji vise ne postoje
+                foreach (var set in new[] { markedLeft, markedRight })
+                    set.RemoveWhere(m => !File.Exists(m) && !Directory.Exists(m));
+
+                // path box koji korisnik upravo uredjuje ne diramo
+                bool editLeft = prevFocus == leftPath && leftPath.Text != leftCurrent;
+                bool editRight = prevFocus == rightPath && rightPath.Text != rightCurrent;
+
+                if (!editLeft) RefreshOnePanel(leftList, leftPath, leftCurrent);
+                if (!editRight) RefreshOnePanel(rightList, rightPath, rightCurrent);
+
+                lastActive = prevActive;
+                if (prevFocus != null && !prevFocus.IsDisposed)
+                {
+                    prevFocus.Focus();
+                    if (prevTb != null) { try { prevTb.SelectionStart = selStart; prevTb.SelectionLength = selLen; } catch { } }
+                }
+                leftList.Invalidate();
+                rightList.Invalidate();
+                UpdateStatus();
+            }
+            catch { }
+            finally { _refreshingOnActivate = false; }
+        }
+
+        private void RefreshOnePanel(ListView list, TextBox pathBox, string currentPath)
+        {
+            try
+            {
+                string selPath = list.SelectedItems.Count > 0 ? list.SelectedItems[0].Tag as string : null;
+                int selIdx = list.SelectedItems.Count > 0 ? list.SelectedItems[0].Index : 0;
+                string topPath = null;
+                try { if (list.TopItem != null) topPath = list.TopItem.Tag as string; } catch { }
+
+                string target = ResolveExistingFolder(currentPath) ?? currentPath;
+                LoadFolder(list, pathBox, target, selPath);
+
+                // ako selektovani fajl vise ne postoji, ostani na istoj poziciji (ne skacemo na vrh)
+                bool selFound = list.SelectedItems.Count > 0 && string.Equals(list.SelectedItems[0].Tag as string, selPath, StringComparison.OrdinalIgnoreCase);
+                if (!selFound && list.Items.Count > 0 && target == currentPath)
+                {
+                    int idx = Math.Min(selIdx, list.Items.Count - 1);
+                    list.SelectedItems.Clear();
+                    list.Items[idx].Selected = true;
+                    list.Items[idx].Focused = true;
+                }
+
+                // vrati scroll poziciju
+                if (topPath != null && target == currentPath)
+                {
+                    foreach (ListViewItem it in list.Items)
+                    {
+                        if (string.Equals(it.Tag as string, topPath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            try { list.TopItem = it; } catch { }
+                            break;
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
 
         private void UpdateStatus()
         {
