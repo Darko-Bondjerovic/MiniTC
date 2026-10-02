@@ -27,7 +27,7 @@ namespace MiniTC
         }
 
         [STAThread]
-        public static void Main(string[] args)
+        public static void Main()
         {
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
             Application.ThreadException += (s, e) =>
@@ -385,6 +385,8 @@ namespace MiniTC
         private Font listFont = new Font("Consolas", 14f);
 
         private HashSet<string> markedLeft = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private string leftLoadedFolder = null;    // folder koji je poslednji put ucitan u levom panelu (za detekciju promene foldera)
+        private string rightLoadedFolder = null;
         private HashSet<string> markedRight = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private HashSet<string> ActiveMarked { get { return ActiveList == leftList ? markedLeft : markedRight; } }
 
@@ -1760,12 +1762,28 @@ namespace MiniTC
             if (drives.Length > 1) rightDrive.SelectedIndex = 1;
         }
 
+        private static bool SameFolder(string a, string b)
+        {
+            if (a == null || b == null) return false;
+            return string.Equals(a.TrimEnd('\\'), b.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
+        }
+
         private void LoadFolder(ListView list, TextBox pathBox, string path, string pathToSelect)
         {
             try
             {
                 if (string.IsNullOrEmpty(path) || !Directory.Exists(path)) path = @"C:\";
                 pathBox.Text = path;
+
+                // Promena foldera u ovom panelu => skini sve oznake (i one iz podfoldera koje su ostale),
+                // da F5/F6/Delete ne uhvate "zaboravljene" crvene fajlove. Osvezavanje istog foldera ne brise oznake.
+                {
+                    bool isLeft = list == leftList;
+                    string prevFolder = isLeft ? leftLoadedFolder : rightLoadedFolder;
+                    if (!SameFolder(prevFolder, path))
+                        (isLeft ? markedLeft : markedRight).Clear();
+                    if (isLeft) leftLoadedFolder = path; else rightLoadedFolder = path;
+                }
 
                 if (list == leftList)
                 {
@@ -2819,10 +2837,11 @@ namespace MiniTC
 
                     var list = ActiveList;
                     var marked = ActiveMarked;
-                    foreach (var f in files) marked.Add(f);
 
+                    // prvo skoci na folder prvog fajla (to brise stare oznake ako se folder menja), pa tek onda markiraj nadjene
                     string first = files[0];
                     LoadFolder(list, list == leftList ? leftPath : rightPath, Path.GetDirectoryName(first), first);
+                    foreach (var f in files) marked.Add(f);
                     int n = files.Count;
                     resForm.Close();
                     list.Focus();
