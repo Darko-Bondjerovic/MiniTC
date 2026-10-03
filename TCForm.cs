@@ -534,6 +534,8 @@ namespace MiniTC
             toolBar.Items.Add(new ToolStripButton("F3 Compare", null, (s, e) => RunCompareTool()) { ToolTipText = "Uporedi 2 fajla (1 levo + 1 desno obelezen) - F3" });
             toolBar.Items.Add(new ToolStripButton("Compare Setup", null, (s, e) => SetupCompareTool()));
             toolBar.Items.Add(new ToolStripSeparator());
+            toolBar.Items.Add(new ToolStripButton("001 Rename", null, (s, e) => SequentialRenameFiles()) { ToolTipText = "Sekvencijalno preimenuj sve fajlove u aktivnom panelu (001,002...) - zadrzava ekstenzije, redosled kako su sortirani" });
+            toolBar.Items.Add(new ToolStripSeparator());
             toolBar.Items.Add(new ToolStripButton("Ctrl+T Tab", null, (s, e) => NewTab()));
             toolBar.Items.Add(new ToolStripButton("Ctrl+W Close", null, (s, e) => CloseTab()));
             toolBar.Items.Add(new ToolStripButton("Ctrl+Tab Next", null, (s, e) => NextTab()));
@@ -3195,7 +3197,193 @@ namespace MiniTC
             }
         }
 
+
+        // ========== 8. SEKVENCIJALNO PREIMENOVANJE 001,002... ==========
+        private void SequentialRenameFiles()
+        {
+            try
+            {
+                var list = ActiveList;
+                if (list == null || list.Items.Count == 0)
+                {
+                    MessageBox.Show("Panel je prazan.", "001 Rename");
+                    return;
+                }
+
+                string curDir = list == leftList ? leftCurrent : rightCurrent;
+                if (string.IsNullOrEmpty(curDir) || !Directory.Exists(curDir))
+                {
+                    MessageBox.Show("Trenutni folder ne postoji: " + curDir, "001 Rename");
+                    return;
+                }
+
+                var filesInOrder = new List<string>();
+                foreach (ListViewItem it in list.Items)
+                {
+                    if (it.Text == "[..]") continue;
+                    string p = it.Tag as string;
+                    if (string.IsNullOrEmpty(p)) continue;
+                    if (File.Exists(p))
+                        filesInOrder.Add(p);
+                }
+
+                if (filesInOrder.Count == 0)
+                {
+                    MessageBox.Show("Nema fajlova za preimenovanje u ovom folderu/panelu.", "001 Rename");
+                    return;
+                }
+
+                string input = Prompt.Show(
+                    "Unesi format pocetnog broja:\n" +
+                    "npr 000 = 3 cifre (000,001,002...)\n" +
+                    "     0001 = 4 cifre (0001,0002...)\n" +
+                    "     001 = krece od 1 sa 3 cifre\n\n" +
+                    "Broj fajlova: " + filesInOrder.Count + " u " + curDir,
+                    "Sekvencijalno preimenovanje",
+                    "000");
+
+                if (string.IsNullOrWhiteSpace(input)) return;
+                input = input.Trim();
+
+                int padLen;
+                int startNum = 0;
+                bool isAllZeros = input.Length > 0 && input.All(c => c == '0');
+
+                if (isAllZeros)
+                {
+                    padLen = input.Length;
+                    startNum = 0;
+                }
+                else
+                {
+                    if (!input.All(char.IsDigit))
+                    {
+                        MessageBox.Show("Unos mora biti broj (npr 000, 0001, 001, 3).", "001 Rename");
+                        return;
+                    }
+                    // ako korisnik unese samo broj 3 ili 4 kao broj nula
+                    if (input.Length == 1 && int.TryParse(input, out int single) && single >= 1 && single <= 9)
+                    {
+                        // ako je ranije bio "000" nece doci ovde, ovo je samo za slucaj da unese "3"
+                        // tretiraj kao broj cifara
+                        // ali da razlikujemo "3" od "003", ako je "3" -> pad 3 start 0
+                        // ako je "003" -> All digits ali ne all zeros, pad 3 start 3
+                        // pa za duzinu 1 specijalno: pad = vrednost
+                        padLen = single;
+                        startNum = 0;
+                    }
+                    else
+                    {
+                        padLen = input.Length;
+                        int parsed;
+                        if (int.TryParse(input, out parsed))
+                            startNum = parsed;
+                    }
+                }
+
+                if (padLen < 1) padLen = 3;
+                if (padLen > 10) padLen = 10;
+
+                var renamePairs = new List<Tuple<string,string>>();
+                var oldSet = new HashSet<string>(filesInOrder, StringComparer.OrdinalIgnoreCase);
+
+                for (int i = 0; i < filesInOrder.Count; i++)
+                {
+                    string oldPath = filesInOrder[i];
+                    string ext = Path.GetExtension(oldPath);
+                    int num = startNum + i;
+                    string newName = num.ToString("D" + padLen) + ext;
+                    string newPath = Path.Combine(curDir, newName);
+                    renamePairs.Add(Tuple.Create(oldPath, newPath));
+                }
+
+                var collisions = renamePairs.Where(p => File.Exists(p.Item2) && !oldSet.Contains(p.Item2)).ToList();
+                if (collisions.Count > 0)
+                {
+                    string msg = "Sledeci ciljni fajlovi vec postoje i nisu deo preimenovanja:\n" +
+                                 string.Join("\n", collisions.Take(10).Select(c => Path.GetFileName(c.Item2))) +
+                                 (collisions.Count > 10 ? "\n... i jos " + (collisions.Count-10) : "") +
+                                 "\n\nDa nastavim i preskocim postojece (Yes) ili otkazem (No)?";
+                    var dr = MessageBox.Show(msg, "001 Rename - kolizija", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                    if (dr != DialogResult.Yes) return;
+                }
+
+                string preview = string.Join("\n", renamePairs.Take(10).Select(p => Path.GetFileName(p.Item1) + " -> " + Path.GetFileName(p.Item2))) +
+                                 (renamePairs.Count > 10 ? "\n... i jos " + (renamePairs.Count-10) : "");
+                var confirm = MessageBox.Show(
+                    "Preimenovati " + renamePairs.Count + " fajlova u " + curDir + "?\n\n" + preview,
+                    "001 Rename - potvrda",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (confirm != DialogResult.Yes) return;
+
+                var tempPaths = new List<Tuple<string,string,string>>();
+                try
+                {
+                    foreach (var pair in renamePairs)
+                    {
+                        string oldPath = pair.Item1;
+                        string newPath = pair.Item2;
+                        if (string.Equals(oldPath, newPath, StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        string tempPath = oldPath + ".tmp_rename_" + Guid.NewGuid().ToString("N");
+                        try
+                        {
+                            File.Move(oldPath, tempPath);
+                            tempPaths.Add(Tuple.Create(oldPath, tempPath, newPath));
+                        }
+                        catch (Exception ex)
+                        {
+                            MessageBox.Show("Greska pri privremenom preimenovanju " + Path.GetFileName(oldPath) + ": " + ex.Message);
+                        }
+                    }
+
+                    int ok2 = 0;
+                    foreach (var t in tempPaths)
+                    {
+                        string tempPath = t.Item2;
+                        string newPath = t.Item3;
+                        try
+                        {
+                            if (File.Exists(newPath))
+                            {
+                                if (!oldSet.Contains(newPath))
+                                    continue;
+                                try { File.Delete(newPath); } catch { }
+                            }
+                            File.Move(tempPath, newPath);
+                            ok2++;
+                        }
+                        catch (Exception ex)
+                        {
+                            MessageBox.Show("Greska pri finalnom preimenovanju u " + Path.GetFileName(newPath) + ": " + ex.Message);
+                            try { if (File.Exists(tempPath) && !File.Exists(t.Item1)) File.Move(tempPath, t.Item1); } catch { }
+                        }
+                    }
+
+                    statusLabel.Text = " 001 Rename: " + ok2 + "/" + filesInOrder.Count + " preimenovano u " + curDir + " (format " + new string('0', padLen) + ")";
+                    lastStatus = statusLabel.Text;
+                }
+                finally
+                {
+                    foreach (var t in tempPaths)
+                    {
+                        try { if (File.Exists(t.Item2)) File.Move(t.Item2, t.Item1); } catch { }
+                    }
+                }
+
+                LoadFolder(leftList, leftPath, leftCurrent, null);
+                LoadFolder(rightList, rightPath, rightCurrent, null);
+                ActiveMarked.Clear();
+                UpdateStatus();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("001 Rename greska: " + ex.Message, "001 Rename");
+            }
+        }
+
         private void DeleteSelected(bool permanent)
+
         {
             List<string> toDel;
 
