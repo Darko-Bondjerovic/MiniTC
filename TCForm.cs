@@ -1144,10 +1144,8 @@ namespace MiniTC
             long free = GetFreeSpace(destDir);
             if (totalSize > 0 && free != long.MaxValue && totalSize > free)
             {
-                if (MessageBox.Show("Nema dovoljno mesta!
-Potrebno: " + FormatSize(totalSize) + "
-Slobodno: " + FormatSize(free) + "
-Nastavi?", "Provera mesta", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+                if (MessageBox.Show("Nema dovoljno mesta!\nPotrebno: " + FormatSize(totalSize) + 
+                    "Slobodno: " + FormatSize(free) + "\nNastavi?", "Provera mesta", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
             }
 
             bool hasCollision; int choice = ConfirmCopyMoveEx("F5 Kopirati", destDir, toCopy, out hasCollision);
@@ -1222,10 +1220,8 @@ Nastavi?", "Provera mesta", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != 
             long free = GetFreeSpace(destDir);
             if (totalSize > 0 && free != long.MaxValue && totalSize > free)
             {
-                if (MessageBox.Show("Nema dovoljno mesta!
-Potrebno: " + FormatSize(totalSize) + "
-Slobodno: " + FormatSize(free) + "
-Nastavi?", "Provera mesta", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+                if (MessageBox.Show("Nema dovoljno mesta!\nPotrebno: " + FormatSize(totalSize) + 
+                    "\nSlobodno: " + FormatSize(free) + "\nNastavi?", "Provera mesta", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
             }
 
             bool hasCollision; int choice = ConfirmCopyMoveEx("F6 Premesti", destDir, toMove, out hasCollision);
