@@ -321,6 +321,14 @@ namespace MiniTC
         private HashSet<string> markedRight = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private HashSet<string> ActiveMarked { get { return ActiveList == leftList? markedLeft : markedRight; } }
         private bool useRealShellMenu = false;
+
+        // --- ALT filter kao u TC ---
+        private static readonly Color ColorFilterBg = Color.FromArgb(15, 45, 90); // tamno plavo kad radi filter
+        private static readonly Color ColorFilterSelBg = Color.FromArgb(30, 70, 130);
+        private string filterText = "";
+        private ListView filterList = null;
+        private List<ListViewItem> leftFullCache = null;
+        private List<ListViewItem> rightFullCache = null;
         private int sortColumn = 0;
         private SortOrder sortOrder = SortOrder.Ascending;
         private ListView currentSortList = null;
@@ -679,7 +687,20 @@ namespace MiniTC
             if (keyData == (Keys.Control | Keys.Tab)) { NextTab(); return true; }
             if (keyData == (Keys.Control | Keys.T)) { NewTab(); return true; }
             if (keyData == (Keys.Control | Keys.W)) { CloseTab(); return true; }
-            if (keyData == Keys.Escape) { ActiveMarked.Clear(); ActiveList.Invalidate(); UpdateStatus(); return true; }
+            if (keyData == Keys.Escape)
+            {
+                if (!string.IsNullOrEmpty(filterText)) { ClearFilter(); return true; }
+                ActiveMarked.Clear(); ActiveList.Invalidate(); UpdateStatus(); return true;
+            }
+            if (keyData == Keys.Back)
+            {
+                if (!string.IsNullOrEmpty(filterText) && filterList == ActiveList)
+                {
+                    if (filterText.Length > 1) ApplyFilter(ActiveList, filterText.Substring(0, filterText.Length - 1));
+                    else ClearFilter();
+                    return true;
+                }
+            }
             if (keyData == Keys.Space) { ToggleMark(); return true; }
             if (keyData == Keys.F6) { MoveSelected(); return true; }
             if (keyData == (Keys.Shift | Keys.F6)) { RenameSelected(); return true; }
@@ -691,6 +712,23 @@ namespace MiniTC
             if (keyData == (Keys.Control | Keys.C)) { ClipboardCopyFiles(); return true; }
             if (keyData == (Keys.Control | Keys.V)) { ClipboardPasteFiles(); return true; }
             if (keyData == (Keys.Control | Keys.X)) { ClipboardCutFiles(); return true; }
+
+            bool alt = (keyData & Keys.Alt) == Keys.Alt;
+            bool ctrl = (keyData & Keys.Control) == Keys.Control;
+            Keys kCode = keyData & Keys.KeyCode;
+            if (alt && !ctrl && !isTyping)
+            {
+                if (kCode >= Keys.A && kCode <= Keys.Z)
+                {
+                    char ch = (char)('a' + (kCode - Keys.A));
+                    JumpToFirst(ch); return true;
+                }
+                if (kCode >= Keys.D0 && kCode <= Keys.D9)
+                {
+                    char ch = (char)('0' + (kCode - Keys.D0));
+                    JumpToFirst(ch); return true;
+                }
+            }
             return base.ProcessCmdKey(ref msg, keyData);
         }
         private void SyncPanel(bool leftGetsRight)
@@ -740,7 +778,9 @@ namespace MiniTC
                 var list = s as ListView; string fullPath = e.Item.Tag as string;
                 bool isMarked = fullPath!= null && (list == leftList? markedLeft.Contains(fullPath) : markedRight.Contains(fullPath));
                 bool isFocusedItem = e.Item.Focused && list.Focused;
-                Color back = isFocusedItem? ColorSelBg : ColorBg; Color fore = isMarked? ColorMarkedFg : (isFocusedItem? ColorSelFg : ColorFg);
+                bool isFiltered = list.BackColor.ToArgb() == ColorFilterBg.ToArgb();
+                Color back = isFocusedItem? (isFiltered? ColorFilterSelBg : ColorSelBg) : (isFiltered? ColorFilterBg : ColorBg);
+                Color fore = isMarked? ColorMarkedFg : (isFocusedItem? ColorSelFg : ColorFg);
                 using (var b = new SolidBrush(back)) e.Graphics.FillRectangle(b, e.Bounds);
                 Font f = isMarked? new Font(listFont, FontStyle.Bold) : listFont;
                 try
@@ -816,6 +856,14 @@ namespace MiniTC
         {
             try
             {
+                // TC logika: promenom foldera filter se gasi, vrati na normalno
+                if (filterList == list || (list == leftList && leftFullCache != null) || (list == rightList && rightFullCache != null))
+                {
+                    if (list == leftList) leftFullCache = null; else rightFullCache = null;
+                    if (filterList == list) { filterText = ""; filterList = null; }
+                    list.BackColor = ColorBg;
+                    statusLabel.Text = ""; lastStatus = "";
+                }
                 if (string.IsNullOrEmpty(path) ||!Directory.Exists(path)) path = @"C:\"; pathBox.Text = path;
                 { bool isLeft = list == leftList; string prevFolder = isLeft? leftLoadedFolder : rightLoadedFolder; if (!SameFolder(prevFolder, path)) (isLeft? markedLeft : markedRight).Clear(); if (isLeft) leftLoadedFolder = path; else rightLoadedFolder = path; }
                 if (list == leftList) { leftCurrent = path; if (leftTabs.Count > leftTabIdx) leftTabs[leftTabIdx].Path = path; } else { rightCurrent = path; if (rightTabs.Count > rightTabIdx) rightTabs[rightTabIdx].Path = path; }
@@ -894,7 +942,10 @@ namespace MiniTC
         {
             var focused = this.ActiveControl; bool isTyping = GetFocusedTextBox()!= null || focused is ComboBox; if (isTyping) return;
             if (e.Alt && e.KeyCode == Keys.F7) { OpenSearchDialog(); e.Handled = true; return; }
-            if (e.Alt && e.KeyCode >= Keys.A && e.KeyCode <= Keys.Z) { JumpToFirst((char)e.KeyCode); e.Handled = true; return; }
+            if (e.Alt && !e.Control && e.KeyCode >= Keys.A && e.KeyCode <= Keys.Z) { JumpToFirst((char)e.KeyCode); e.Handled = true; return; }
+            if (e.Alt && !e.Control && e.KeyCode >= Keys.D0 && e.KeyCode <= Keys.D9) { JumpToFirst((char)('0' + (e.KeyCode - Keys.D0))); e.Handled = true; return; }
+            if (e.KeyCode == Keys.Escape && !string.IsNullOrEmpty(filterText)) { ClearFilter(); e.Handled = true; return; }
+            if (e.KeyCode == Keys.Back && !string.IsNullOrEmpty(filterText)) { if (filterText.Length > 1) ApplyFilter(ActiveList, filterText.Substring(0, filterText.Length - 1)); else ClearFilter(); e.Handled = true; return; }
             if (e.Shift && e.KeyCode == Keys.F6) { RenameSelected(); e.Handled = true; return; }
             switch (e.KeyCode)
             {
@@ -906,10 +957,76 @@ namespace MiniTC
             if (e.Control && e.KeyCode == Keys.C) { ClipboardCopyFiles(); e.Handled = true; return; }
             if (e.Control && e.KeyCode == Keys.V) { ClipboardPasteFiles(); e.Handled = true; return; }
         }
+        private void ClearFilter()
+        {
+            // samo ugasi filter, vrati punu listu iz kesa (bez citanja diska) - kao TC
+            ListView lv = filterList ?? ActiveList;
+            if (lv == null) return;
+            var cache = lv == leftList? leftFullCache : rightFullCache;
+            if (cache != null)
+            {
+                lv.BeginUpdate();
+                lv.Items.Clear();
+                foreach (var it in cache) lv.Items.Add(it);
+                lv.EndUpdate();
+            }
+            lv.BackColor = ColorBg;
+            if (lv == leftList) leftFullCache = null; else rightFullCache = null;
+            filterText = ""; filterList = null;
+            statusLabel.Text = ""; lastStatus = ""; UpdateStatus();
+            lv.Invalidate();
+            if (lv.Items.Count > 0) { lv.Items[0].Selected = true; lv.Items[0].Focused = true; }
+        }
+
+        private void ApplyFilter(ListView list, string prefix)
+        {
+            if (string.IsNullOrEmpty(prefix)) { ClearFilter(); return; }
+            if (list == null) list = ActiveList;
+            var cache = list == leftList? leftFullCache : rightFullCache;
+            if (cache == null)
+            {
+                var all = new List<ListViewItem>();
+                foreach (ListViewItem it in list.Items) all.Add(it);
+                if (list == leftList) leftFullCache = all; else rightFullCache = all;
+                cache = all;
+            }
+            list.BeginUpdate();
+            list.Items.Clear();
+            ListViewItem upItem = null;
+            foreach (var it in cache)
+            {
+                if (it.Text == "[..]") { upItem = it; continue; }
+                string name = it.Text.Trim('[', ']', ' ');
+                if (name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    list.Items.Add(it);
+            }
+            if (upItem != null) list.Items.Insert(0, upItem);
+            list.EndUpdate();
+
+            list.BackColor = ColorFilterBg;
+            filterList = list;
+            filterText = prefix;
+            statusLabel.Text = $" FILTER: {prefix} ({list.Items.Count} stavki) - ESC/Backspace gasi, ALT+slovo dodaje";
+            lastStatus = statusLabel.Text;
+
+            if (list.Items.Count > 0)
+            {
+                int idx = (list.Items[0].Text == "[..]" && list.Items.Count > 1) ? 1 : 0;
+                list.SelectedItems.Clear();
+                list.Items[idx].Selected = true;
+                list.Items[idx].Focused = true;
+                list.EnsureVisible(idx);
+            }
+            list.Focus(); lastActive = list;
+        }
+
         private void JumpToFirst(char c)
         {
-            var list = ActiveList; string search = c.ToString().ToLower();
-            for (int i = 0; i < list.Items.Count; i++) { var name = list.Items[i].Text.Trim('[', ']', '.').ToLower(); if (name.StartsWith(search)) { list.SelectedItems.Clear(); list.Items[i].Selected = true; list.Items[i].Focused = true; list.EnsureVisible(i); list.Focus(); break; } }
+            // TC quick filter: kumulativno
+            string ch = c.ToString().ToLowerInvariant();
+            if (filterList != null && filterList != ActiveList) ClearFilter();
+            string newFilter = (filterList == ActiveList && !string.IsNullOrEmpty(filterText)) ? filterText + ch : ch;
+            ApplyFilter(ActiveList, newFilter);
         }
         private void SafeClipboard(string text)
         {
