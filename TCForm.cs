@@ -2365,10 +2365,90 @@ namespace MiniTC
             }
             catch { return false; }
         }
+        // ---------- Ucitavanje / snimanje teksta za pregled u pretrazi ----------
+        private const long PreviewMaxBytes = 10L * 1024 * 1024;
+        private sealed class LoadedText { public string Text; public Encoding Enc; public bool Lf; public string Error; }
+
+        /// <summary>Cita tekstualni fajl: prepoznaje BOM (UTF-8/UTF-16), UTF-8 bez BOM-a ili ANSI 1250. Pamti kraj reda (LF/CRLF) da bi snimanje vratilo isti format.</summary>
+        private static LoadedText LoadTextFile(string path)
+        {
+            var r = new LoadedText();
+            try
+            {
+                long len = new FileInfo(path).Length;
+                if (len > PreviewMaxBytes) { r.Error = "Fajl je prevelik za prikaz (" + FormatSize(len) + ") - F4 otvara u Notepadu."; return r; }
+                byte[] b;
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                {
+                    b = new byte[fs.Length]; int off = 0;
+                    while (off < b.Length) { int n = fs.Read(b, off, b.Length - off); if (n <= 0) break; off += n; }
+                    if (off < b.Length) Array.Resize(ref b, off);
+                }
+                Encoding enc = null; int skip = 0;
+                if (b.Length >= 3 && b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF) { enc = new UTF8Encoding(true); skip = 3; }
+                else if (b.Length >= 2 && b[0] == 0xFF && b[1] == 0xFE) { enc = new UnicodeEncoding(false, true); skip = 2; }
+                else if (b.Length >= 2 && b[0] == 0xFE && b[1] == 0xFF) { enc = new UnicodeEncoding(true, true); skip = 2; }
+                else
+                {
+                    int lim = Math.Min(b.Length, 8000);
+                    for (int i = 0; i < lim; i++) if (b[i] == 0) { r.Error = "Binarni fajl - prikaz teksta nije moguc (F4 otvara u Notepadu)."; return r; }
+                    try { r.Text = new UTF8Encoding(false, true).GetString(b); enc = new UTF8Encoding(false); }
+                    catch (DecoderFallbackException) { enc = GetAnsiEncoding(); }
+                }
+                if (r.Text == null) r.Text = enc.GetString(b, skip, b.Length - skip);
+                r.Enc = enc;
+                r.Lf = r.Text.IndexOf('\n') >= 0 && r.Text.IndexOf("\r\n", StringComparison.Ordinal) < 0;
+                // TextBox prikazuje nove redove samo kao \r\n
+                if (r.Text.IndexOf('\n') >= 0) r.Text = Regex.Replace(r.Text, "(?<!\r)\n", "\r\n");
+            }
+            catch (Exception ex) { r.Error = "Ne mogu da procitam fajl: " + FriendlyError(ex); r.Text = null; }
+            return r;
+        }
+
+        private static void SaveTextFile(string path, string text, Encoding enc, bool lf)
+        {
+            if (lf) text = text.Replace("\r\n", "\n");
+            byte[] pre = enc.GetPreamble();
+            byte[] body = enc.GetBytes(text);
+            string dir = Path.GetDirectoryName(path);
+            string tmp = Path.Combine(dir, "~mtcsave" + Guid.NewGuid().ToString("N").Substring(0, 10) + ".tmp");
+            try
+            {
+                using (var fs = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    if (pre.Length > 0) fs.Write(pre, 0, pre.Length);
+                    fs.Write(body, 0, body.Length);
+                    fs.Flush(true);
+                }
+                // File.Replace cuva atribute i datum kreiranja originala; ako ne uspe (npr. mrezni disk) - obican Move
+                try { File.Replace(tmp, path, null, true); }
+                catch (IOException) { File.Move(tmp, path, true); }
+            }
+            finally { try { if (File.Exists(tmp)) File.Delete(tmp); } catch { } }
+        }
+
+        private static string EncodingName(Encoding enc)
+        {
+            if (enc == null) return "";
+            bool bom = enc.GetPreamble().Length > 0;
+            if (enc is UTF8Encoding) return bom ? "UTF-8 BOM" : "UTF-8";
+            if (enc is UnicodeEncoding) return enc.WebName.Equals("utf-16BE", StringComparison.OrdinalIgnoreCase) ? "UTF-16 BE" : "UTF-16";
+            return "ANSI " + enc.CodePage;
+        }
+
+        private static int CountOccurrences(string text, string find, StringComparison comp)
+        {
+            if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(find)) return 0;
+            int n = 0, i = 0;
+            while ((i = text.IndexOf(find, i, comp)) >= 0) { n++; i += find.Length; }
+            return n;
+        }
+
         private void ShowSearchResults(PanelState tp, string pattern, string root, bool includeSub, bool caseSensitive, string contentText = null)
         {
-            string what = "'" + pattern + "'" + (contentText != null ? " sa tekstom '" + contentText + "'" : "");
-            Form resForm = new Form() { Width = 900, Height = 600, Text = "Rezultati pretrage za " + what + " u " + root + " - DblClick/Enter locira fajl", StartPosition = FormStartPosition.CenterParent, WindowState = FormWindowState.Maximized, MinimizeBox = false, MaximizeBox = true, ShowInTaskbar = false };
+            bool textMode = contentText != null;
+            string what = "'" + pattern + "'" + (textMode ? " sa tekstom '" + contentText + "'" : "");
+            Form resForm = new Form() { Width = 900, Height = 600, Text = "Rezultati pretrage za " + what + " u " + root + " - DblClick/Enter locira fajl", StartPosition = FormStartPosition.CenterParent, WindowState = FormWindowState.Maximized, MinimizeBox = false, MaximizeBox = true, ShowInTaskbar = false, KeyPreview = true };
             ListView lv = new ListView() { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, HideSelection = false, MultiSelect = false, BackColor = ColorBg, ForeColor = ColorFg, Font = listFont };
             lv.Columns.Add("Ime", 250); lv.Columns.Add("Putanja", 400); lv.Columns.Add("Velicina", 80); lv.Columns.Add("Datum", 130);
             Action fitColumns = () => { int w = lv.ClientSize.Width - SystemInformation.VerticalScrollBarWidth; if (w <= 0) return; int c0 = (int)(w * 0.25); int c1 = (int)(w * 0.50); int c2 = (int)(w * 0.10); lv.Columns[0].Width = c0; lv.Columns[1].Width = c1; lv.Columns[2].Width = c2; lv.Columns[3].Width = w - c0 - c1 - c2; };
@@ -2382,9 +2462,288 @@ namespace MiniTC
             Button btnClose = new Button() { Text = "Zatvori (Esc)", Left = 780, Top = 8, Width = 130, DialogResult = DialogResult.Cancel };
             bottomPanel.Controls.AddRange(new Control[] { btnGoto, btnOpen, btnSelectAll, btnClose }); resForm.CancelButton = btnClose;
             bottomPanel.Resize += (s, e) => { btnClose.Left = bottomPanel.ClientSize.Width - btnClose.Width - 10; };
-            resForm.Controls.Add(lv); resForm.Controls.Add(bottomPanel); resForm.Controls.Add(lblCount); resForm.Controls.Add(lblStatus); DarkTheme.Apply(resForm); DarkTheme.DarkScroll(lv);
-            var foundFiles = new List<string>(); var cts = new CancellationTokenSource(); resForm.FormClosing += (s, e) => { cts.Cancel(); };
+
+            // ================= Pregled / izmena teksta (samo kada se trazi tekst) =================
+            SplitContainer split = null;
+            TextBox editor = null;
+            Label lblFile = null, lblEdit = null;
+            ToolStripButton btnSave = null, btnWrap = null;
+            string loadedPath = null, findText = contentText;
+            Encoding curEnc = null; bool curLf = false, modified = false, loading = false, restoringSel = false;
+            int totalHits = 0;
+            var comp = caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+
+            Action updateEditStatus = () =>
+            {
+                if (editor == null) return;
+                string t;
+                if (loadedPath == null) t = "";
+                else
+                {
+                    int pos = editor.SelectionStart;
+                    int line = editor.GetLineFromCharIndex(pos);
+                    int col = pos - editor.GetFirstCharIndexFromLine(line) + 1;
+                    t = " Ln " + (line + 1) + ", Col " + col + "   |   " + EncodingName(curEnc) + "   |   " + (curLf ? "LF" : "CRLF") +
+                        "   |   '" + findText + "': " + totalHits + " pogodaka" + (modified ? "   |   IZMENJENO (Ctrl+S)" : "");
+                }
+                if (lblEdit.Text != t) lblEdit.Text = t;
+            };
+            Action updateTitle = () =>
+            {
+                if (lblFile == null) return;
+                lblFile.Text = loadedPath == null ? " (izaberi fajl u listi iznad)" : " " + (modified ? "* " : "") + loadedPath;
+                if (btnSave != null) btnSave.Enabled = loadedPath != null && !editor.ReadOnly;
+            };
+            Action<string> editMsg = (m) => { if (lblEdit != null) lblEdit.Text = " " + m; };
+
+            Action<bool> findNext = (forward) =>
+            {
+                if (editor == null || loadedPath == null || string.IsNullOrEmpty(findText)) return;
+                string t = editor.Text; if (t.Length == 0) return;
+                int idx; bool wrapped = false;
+                if (forward)
+                {
+                    int start = Math.Min(t.Length, editor.SelectionStart + (editor.SelectionLength > 0 ? 1 : 0));
+                    idx = t.IndexOf(findText, start, comp);
+                    if (idx < 0) { idx = t.IndexOf(findText, 0, comp); wrapped = true; }
+                }
+                else
+                {
+                    int start = editor.SelectionStart - 1 + findText.Length - 1;
+                    idx = (editor.SelectionStart > 0 && start >= 0) ? t.LastIndexOf(findText, Math.Min(start, t.Length - 1), comp) : -1;
+                    if (idx < 0) { idx = t.LastIndexOf(findText, t.Length - 1, comp); wrapped = true; }
+                }
+                if (idx < 0) { editMsg("'" + findText + "' nije pronadjen"); System.Media.SystemSounds.Beep.Play(); return; }
+                editor.Select(idx, findText.Length);
+                editor.ScrollToCaret();
+                updateEditStatus();
+                if (wrapped) lblEdit.Text += forward ? "   (nastavljeno od pocetka)" : "   (nastavljeno od kraja)";
+            };
+
+            Func<bool> saveEditor = () =>
+            {
+                if (editor == null || loadedPath == null || editor.ReadOnly) return true;
+                try
+                {
+                    SaveTextFile(loadedPath, editor.Text, curEnc, curLf);
+                    modified = false; updateTitle();
+                    totalHits = CountOccurrences(editor.Text, findText, comp);
+                    try
+                    {
+                        var fi = new FileInfo(loadedPath);
+                        foreach (ListViewItem it in lv.Items)
+                            if (string.Equals(it.Tag as string, loadedPath, StringComparison.OrdinalIgnoreCase)) { it.SubItems[2].Text = FormatSize(fi.Length); it.SubItems[3].Text = fi.LastWriteTime.ToString("dd.MM.yyyy HH:mm"); }
+                    }
+                    catch { }
+                    updateEditStatus(); lblEdit.Text += "   |   Sacuvano " + DateTime.Now.ToString("HH:mm:ss");
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(resForm, "Ne mogu da sacuvam:\n" + loadedPath + "\n\n" + FriendlyError(ex), "Ctrl+S", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return false;
+                }
+            };
+
+            // true = moze dalje (sacuvano ili odbaceno), false = korisnik je otkazao
+            Func<bool> confirmSave = () =>
+            {
+                if (!modified) return true;
+                int r = ShowChoiceDialog(resForm, "Sacuvaj izmene", "Fajl je izmenjen:\n" + loadedPath + "\n\nSacuvati izmene?", new[] { "Sacuvaj", "Ne cuvaj", "Otkazi" }, 0, 2);
+                if (r == 0) return saveEditor();
+                if (r == 1) { modified = false; updateTitle(); return true; }
+                return false;
+            };
+
+            Action<string> loadIntoEditor = (path) =>
+            {
+                var lt = LoadTextFile(path);
+                loading = true;
+                try
+                {
+                    loadedPath = path;
+                    if (lt.Error != null)
+                    {
+                        editor.ReadOnly = true; editor.Text = ""; curEnc = null; totalHits = 0;
+                        modified = false; updateTitle(); editMsg(lt.Error);
+                        return;
+                    }
+                    editor.ReadOnly = false;
+                    curEnc = lt.Enc; curLf = lt.Lf;
+                    editor.Text = lt.Text;
+                    editor.ClearUndo();
+                    modified = false;
+                    totalHits = CountOccurrences(lt.Text, findText, comp);
+                }
+                finally { loading = false; }
+                updateTitle();
+                editor.Select(0, 0);
+                findNext(true); // skoci na prvi pogodak
+                updateEditStatus();
+            };
+
+            Action openInNotepad = () =>
+            {
+                string path = loadedPath;
+                if (lv.SelectedItems.Count > 0) path = lv.SelectedItems[0].Tag as string;
+                if (string.IsNullOrEmpty(path) || !File.Exists(path)) return;
+                if (string.Equals(path, loadedPath, StringComparison.OrdinalIgnoreCase) && !confirmSave()) return;
+                try { Process.Start(new ProcessStartInfo("notepad.exe", "\"" + path + "\"") { UseShellExecute = true }); }
+                catch (Exception ex) { MessageBox.Show(resForm, "Notepad greska: " + ex.Message); }
+            };
+
+            Action findDialog = () =>
+            {
+                if (editor == null) return;
+                string s = Prompt.Show("Trazi u tekstu (F3 sledeci, Shift+F3 prethodni):", "Trazi (Ctrl+F)", editor.SelectionLength > 0 && editor.SelectionLength < 200 ? editor.SelectedText : findText);
+                if (string.IsNullOrEmpty(s)) return;
+                findText = s;
+                totalHits = CountOccurrences(editor.Text, findText, comp);
+                findNext(true); updateEditStatus(); editor.Focus();
+            };
+
+            Action replaceDialog = () =>
+            {
+                if (editor == null || loadedPath == null || editor.ReadOnly) return;
+                using (var f = new Form { Width = 520, Height = 200, Text = "Zameni (Ctrl+H)", FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterParent, MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false })
+                {
+                    var l1 = new Label { Left = 10, Top = 10, Width = 480, Text = "Trazi:" };
+                    var t1 = new TextBox { Left = 10, Top = 30, Width = 480, Text = editor.SelectionLength > 0 && editor.SelectionLength < 200 ? editor.SelectedText : findText };
+                    var l2 = new Label { Left = 10, Top = 60, Width = 480, Text = "Zameni sa:" };
+                    var t2 = new TextBox { Left = 10, Top = 80, Width = 480 };
+                    var ok = new Button { Text = "Zameni sve", Left = 290, Top = 120, Width = 100, DialogResult = DialogResult.OK };
+                    var cancel = new Button { Text = "Otkazi", Left = 400, Top = 120, Width = 90, DialogResult = DialogResult.Cancel };
+                    f.Controls.AddRange(new Control[] { l1, t1, l2, t2, ok, cancel }); f.AcceptButton = ok; f.CancelButton = cancel;
+                    DarkTheme.Apply(f);
+                    f.Shown += (s, e) => { t2.Focus(); };
+                    if (f.ShowDialog(resForm) != DialogResult.OK || t1.Text.Length == 0) return;
+                    string a = t1.Text, b = t2.Text;
+                    var rx = new Regex(Regex.Escape(a), (caseSensitive ? RegexOptions.None : RegexOptions.IgnoreCase) | RegexOptions.CultureInvariant);
+                    string src = editor.Text;
+                    int n = rx.Matches(src).Count;
+                    if (n == 0) { editMsg("'" + a + "' nije pronadjen - nista nije zamenjeno"); return; }
+                    int caret = editor.SelectionStart;
+                    editor.SelectAll();
+                    editor.SelectedText = rx.Replace(src, m => b); // preko SelectedText da Ctrl+Z moze da vrati
+                    editor.Select(Math.Min(caret, editor.TextLength), 0); editor.ScrollToCaret();
+                    totalHits = CountOccurrences(editor.Text, findText, comp);
+                    updateEditStatus(); lblEdit.Text += "   |   Zamenjeno: " + n;
+                    editor.Focus();
+                }
+            };
+
+            Action gotoLine = () =>
+            {
+                if (editor == null || loadedPath == null) return;
+                int lines = editor.GetLineFromCharIndex(editor.TextLength) + 1;
+                string s = Prompt.Show("Broj linije (1 - " + lines + "):", "Idi na liniju (Ctrl+G)", (editor.GetLineFromCharIndex(editor.SelectionStart) + 1).ToString());
+                int n; if (!int.TryParse(s, out n)) return;
+                n = Math.Max(1, Math.Min(lines, n));
+                int idx = editor.GetFirstCharIndexFromLine(n - 1); if (idx < 0) return;
+                editor.Select(idx, 0); editor.ScrollToCaret(); editor.Focus(); updateEditStatus();
+            };
+
+            Action reloadFile = () =>
+            {
+                if (loadedPath == null) return;
+                if (modified && ShowChoiceDialog(resForm, "Ponovo ucitaj", "Odbaciti izmene i ponovo ucitati fajl sa diska?", new[] { "Odbaci i ucitaj", "Otkazi" }, 1, 1) != 0) return;
+                modified = false; loadIntoEditor(loadedPath);
+            };
+
+            if (textMode)
+            {
+                split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, BackColor = ColorSplitter, SplitterWidth = 6, BorderStyle = BorderStyle.None };
+                editor = new TextBox
+                {
+                    Dock = DockStyle.Fill, Multiline = true, ScrollBars = ScrollBars.Both, WordWrap = false, AcceptsReturn = true, AcceptsTab = true,
+                    HideSelection = false, MaxLength = 0, ReadOnly = true, Font = new Font("Consolas", 11f), BackColor = Color.FromArgb(25, 25, 25), ForeColor = ColorFg, BorderStyle = BorderStyle.None
+                };
+                lblFile = new Label { Dock = DockStyle.Top, Height = 24, BackColor = ColorHeaderBg, ForeColor = Color.White, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true, Text = " (izaberi fajl u listi iznad)" };
+                lblEdit = new Label { Dock = DockStyle.Bottom, Height = 22, BackColor = ColorToolbarBg, ForeColor = ColorStatusFg, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true };
+                var ts = new ToolStrip { Dock = DockStyle.Top, GripStyle = ToolStripGripStyle.Hidden, BackColor = ColorToolbarBg, ForeColor = ColorToolbarFg };
+                Action<string, string, Action> add = (text, tip, act) => ts.Items.Add(new ToolStripButton(text, null, (s, e) => { act(); }) { ToolTipText = tip });
+                btnSave = new ToolStripButton("Sacuvaj", null, (s, e) => { saveEditor(); editor.Focus(); }) { ToolTipText = "Sacuvaj izmene (Ctrl+S)", Enabled = false };
+                ts.Items.Add(btnSave);
+                ts.Items.Add(new ToolStripSeparator());
+                add("Ponisti", "Ponisti poslednju izmenu (Ctrl+Z)", () => { if (editor.CanUndo) editor.Undo(); editor.Focus(); });
+                add("Iseci", "Iseci (Ctrl+X)", () => { editor.Cut(); editor.Focus(); });
+                add("Kopiraj", "Kopiraj (Ctrl+C)", () => { editor.Copy(); editor.Focus(); });
+                add("Nalepi", "Nalepi iz clipboard-a (Ctrl+V)", () => { editor.Paste(); editor.Focus(); });
+                add("Sve", "Izaberi sve (Ctrl+A)", () => { editor.SelectAll(); editor.Focus(); });
+                ts.Items.Add(new ToolStripSeparator());
+                add("Trazi...", "Promeni trazeni tekst (Ctrl+F)", () => findDialog());
+                add("< Prethodni", "Prethodni pogodak (Shift+F3)", () => findNext(false));
+                add("Sledeci >", "Sledeci pogodak (F3)", () => findNext(true));
+                add("Zameni...", "Zameni sve (Ctrl+H)", () => replaceDialog());
+                add("Idi na liniju", "Idi na liniju (Ctrl+G)", () => gotoLine());
+                ts.Items.Add(new ToolStripSeparator());
+                btnWrap = new ToolStripButton("Prelom reda") { CheckOnClick = true, ToolTipText = "Prelamanje dugih redova" };
+                btnWrap.CheckedChanged += (s, e) => { editor.WordWrap = btnWrap.Checked; btnWrap.BackColor = btnWrap.Checked ? ColorShellOnBg : ColorToolbarBg; };
+                ts.Items.Add(btnWrap);
+                ts.Items.Add(new ToolStripSeparator());
+                add("Notepad (F4)", "Otvori fajl u Notepadu (F4)", () => openInNotepad());
+                add("Ponovo ucitaj", "Ponovo ucitaj fajl sa diska", () => reloadFile());
+
+                editor.TextChanged += (s, e) => { if (loading || modified) return; modified = true; updateTitle(); updateEditStatus(); };
+                editor.KeyUp += (s, e) => updateEditStatus();
+                editor.MouseUp += (s, e) => updateEditStatus();
+                editor.KeyDown += (s, e) => { if (e.KeyData == (Keys.Control | Keys.A)) { editor.SelectAll(); e.SuppressKeyPress = true; } };
+                DarkTheme.DarkScroll(editor);
+
+                split.Panel1.Controls.Add(lv);
+                split.Panel2.Controls.Add(editor); split.Panel2.Controls.Add(lblEdit); split.Panel2.Controls.Add(ts); split.Panel2.Controls.Add(lblFile);
+                resForm.Controls.Add(split);
+            }
+            else resForm.Controls.Add(lv);
+
+            resForm.Controls.Add(bottomPanel); resForm.Controls.Add(lblCount); resForm.Controls.Add(lblStatus); DarkTheme.Apply(resForm); DarkTheme.DarkScroll(lv);
+            if (textMode) { editor.BackColor = Color.FromArgb(25, 25, 25); editor.ForeColor = ColorFg; editor.BorderStyle = BorderStyle.None; }
+
+            var foundFiles = new List<string>(); var cts = new CancellationTokenSource();
+            // prvo provera nesacuvanih izmena; tek ako se zatvara - prekida se pretraga
+            resForm.FormClosing += (s, e) => { if (textMode && !confirmSave()) { e.Cancel = true; return; } cts.Cancel(); };
             Action<Action> ui = (a) => { try { if (!resForm.IsDisposed && resForm.IsHandleCreated) resForm.BeginInvoke(a); } catch { } };
+
+            if (textMode)
+            {
+                lv.SelectedIndexChanged += (s, e) =>
+                {
+                    if (restoringSel) return;
+                    ui(() =>
+                    {
+                        if (lv.SelectedItems.Count == 0) return;
+                        string path = lv.SelectedItems[0].Tag as string;
+                        if (string.Equals(path, loadedPath, StringComparison.OrdinalIgnoreCase)) return;
+                        if (!confirmSave())
+                        {
+                            // korisnik je otkazao - vrati selekciju na fajl koji se edituje
+                            restoringSel = true;
+                            try { foreach (ListViewItem it in lv.Items) if (string.Equals(it.Tag as string, loadedPath, StringComparison.OrdinalIgnoreCase)) { it.Selected = true; it.Focused = true; it.EnsureVisible(); break; } }
+                            finally { restoringSel = false; }
+                            return;
+                        }
+                        loadIntoEditor(path);
+                    });
+                };
+            }
+
+            resForm.KeyDown += (s, e) =>
+            {
+                bool handled = true;
+                switch (e.KeyData)
+                {
+                    case Keys.F4: openInNotepad(); break;
+                    case Keys.F3: if (textMode) findNext(true); else handled = false; break;
+                    case Keys.Shift | Keys.F3: if (textMode) findNext(false); else handled = false; break;
+                    case Keys.Control | Keys.S: if (textMode) saveEditor(); else handled = false; break;
+                    case Keys.Control | Keys.F: if (textMode) findDialog(); else handled = false; break;
+                    case Keys.Control | Keys.H: if (textMode) replaceDialog(); else handled = false; break;
+                    case Keys.Control | Keys.G: if (textMode) gotoLine(); else handled = false; break;
+                    default: handled = false; break;
+                }
+                if (handled) { e.Handled = true; e.SuppressKeyPress = true; }
+            };
+
             Action<string> goToFile = (fullPath) =>
             {
                 try
@@ -2410,6 +2769,11 @@ namespace MiniTC
             var token = cts.Token;
             resForm.Shown += (s0, e0) =>
             {
+                if (textMode)
+                {
+                    try { split.Panel1MinSize = 80; split.Panel2MinSize = 120; split.SplitterDistance = (int)(split.Height * 0.35); } catch { }
+                    updateTitle();
+                }
                 Task.Run(() =>
                 {
                     try
@@ -2446,7 +2810,18 @@ namespace MiniTC
                                         lock (foundFiles) foundFiles.Add(fsi.FullName);
                                         count++;
                                         string full = fsi.FullName, nm = fsi.Name; DateTime lw = fsi.LastWriteTime; long size = isDir ? 0 : ((FileInfo)fsi).Length; int cnt = count;
-                                        ui(() => { try { var item = new ListViewItem(isDir ? "[" + nm + "]" : nm) { Tag = full }; item.SubItems.Add(Path.GetDirectoryName(full)); item.SubItems.Add(isDir ? "<DIR>" : FormatSize(size)); item.SubItems.Add(lw.ToString("dd.MM.yyyy HH:mm")); lv.Items.Add(item); lblCount.Text = " Pronadjeno: " + lv.Items.Count + (cnt >= 1000 ? " (limit 1000)" : ""); } catch { } });
+                                        ui(() =>
+                                        {
+                                            try
+                                            {
+                                                var item = new ListViewItem(isDir ? "[" + nm + "]" : nm) { Tag = full }; item.SubItems.Add(Path.GetDirectoryName(full)); item.SubItems.Add(isDir ? "<DIR>" : FormatSize(size)); item.SubItems.Add(lw.ToString("dd.MM.yyyy HH:mm"));
+                                                lv.Items.Add(item);
+                                                lblCount.Text = " Pronadjeno: " + lv.Items.Count + (cnt >= 1000 ? " (limit 1000)" : "");
+                                                // prvi rezultat odmah u pregled, dok pretraga i dalje radi
+                                                if (textMode && lv.Items.Count == 1 && lv.SelectedItems.Count == 0) { item.Selected = true; item.Focused = true; }
+                                            }
+                                            catch { }
+                                        });
                                     }
                                     catch { }
                                 }
@@ -2454,7 +2829,14 @@ namespace MiniTC
                             }
                             catch { }
                         }
-                        ui(() => { int total; lock (foundFiles) { total = foundFiles.Count; } lblStatus.Text = " Pretraga zavrsena u " + root + " | ukupno: " + total + " rezultata za " + what + " (Esc za zatvaranje, Enter/DblClick za lociranje)"; lblCount.Text = " Pronadjeno: " + total + (total >= 1000 ? " (limit 1000)" : "") + " | DblClick ili Enter locira fajl u panelu"; if (lv.Items.Count > 0) { lv.Items[0].Selected = true; lv.Items[0].Focused = true; lv.Focus(); } });
+                        ui(() =>
+                        {
+                            int total; lock (foundFiles) { total = foundFiles.Count; }
+                            lblStatus.Text = " Pretraga zavrsena u " + root + " | ukupno: " + total + " rezultata za " + what + (textMode ? " (F3 sledeci pogodak, F4 Notepad, Ctrl+S cuva, Enter locira fajl)" : " (Esc za zatvaranje, Enter/DblClick za lociranje)");
+                            lblCount.Text = " Pronadjeno: " + total + (total >= 1000 ? " (limit 1000)" : "") + " | DblClick ili Enter locira fajl u panelu";
+                            // ne otima selekciju/fokus ako je korisnik vec nesto izabrao ili edituje
+                            if (lv.Items.Count > 0 && lv.SelectedItems.Count == 0) { lv.Items[0].Selected = true; lv.Items[0].Focused = true; lv.Focus(); }
+                        });
                     }
                     catch (Exception ex) { string msg = ex.Message; ui(() => { lblStatus.Text = " Greska: " + msg; }); }
                 });
