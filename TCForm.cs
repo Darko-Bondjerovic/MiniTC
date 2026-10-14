@@ -2278,17 +2278,82 @@ namespace MiniTC
         private void OpenSearchDialog()
         {
             var p = Active; string root = p.Current;
-            using (Form dlg = new Form() { Width = 450, Height = 200, FormBorderStyle = FormBorderStyle.FixedDialog, Text = "Alt+F7 Pretraga - u: " + root, StartPosition = FormStartPosition.CenterParent, MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false })
+            using (Form dlg = new Form() { Width = 520, Height = 260, FormBorderStyle = FormBorderStyle.FixedDialog, Text = "Alt+F7 Pretraga - u: " + root, StartPosition = FormStartPosition.CenterParent, MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false })
             {
-                Label lbl = new Label() { Left = 10, Top = 15, Width = 400, Text = "Trazi (npr *.cs, *form*, MiniTC):" };
-                TextBox txt = new TextBox() { Left = 10, Top = 35, Width = 410, Text = "" };
-                CheckBox chkSub = new CheckBox() { Left = 10, Top = 65, Width = 180, Text = "Pretrazi podfoldere", Checked = true };
-                CheckBox chkCase = new CheckBox() { Left = 200, Top = 65, Width = 180, Text = "Case sensitive", Checked = false };
-                Button ok = new Button() { Text = "Trazi", Left = 240, Top = 100, Width = 80, DialogResult = DialogResult.OK };
-                Button cancel = new Button() { Text = "Otkazi", Left = 330, Top = 100, Width = 90, DialogResult = DialogResult.Cancel };
-                dlg.Controls.AddRange(new Control[] { lbl, txt, chkSub, chkCase, ok, cancel }); dlg.AcceptButton = ok; dlg.CancelButton = cancel; DarkTheme.Apply(dlg); dlg.Shown += (s, e) => txt.Focus();
-                if (dlg.ShowDialog(this) == DialogResult.OK) { string pattern = txt.Text.Trim(); if (string.IsNullOrWhiteSpace(pattern)) return; ShowSearchResults(p, pattern, root, chkSub.Checked, chkCase.Checked); }
+                Label lbl = new Label() { Left = 10, Top = 15, Width = 480, Text = "Ime fajla (npr *.cs, *form*, MiniTC):" };
+                TextBox txt = new TextBox() { Left = 10, Top = 35, Width = 480, Text = lastSearchName };
+                CheckBox chkText = new CheckBox() { Left = 10, Top = 68, Width = 480, Text = "Trazi tekst u fajlovima:", Checked = false };
+                TextBox txtContent = new TextBox() { Left = 10, Top = 92, Width = 480, Text = lastSearchText, Enabled = false };
+                CheckBox chkSub = new CheckBox() { Left = 10, Top = 128, Width = 200, Text = "Pretrazi podfoldere", Checked = true };
+                CheckBox chkCase = new CheckBox() { Left = 220, Top = 128, Width = 200, Text = "Case sensitive", Checked = false };
+                Button ok = new Button() { Text = "Trazi", Left = 310, Top = 170, Width = 85, DialogResult = DialogResult.OK };
+                Button cancel = new Button() { Text = "Otkazi", Left = 405, Top = 170, Width = 85, DialogResult = DialogResult.Cancel };
+                chkText.CheckedChanged += (s, e) =>
+                {
+                    txtContent.Enabled = chkText.Checked;
+                    if (chkText.Checked) { txtContent.Focus(); txtContent.SelectAll(); }
+                };
+                dlg.Controls.AddRange(new Control[] { lbl, txt, chkText, txtContent, chkSub, chkCase, ok, cancel }); dlg.AcceptButton = ok; dlg.CancelButton = cancel; DarkTheme.Apply(dlg);
+                dlg.Shown += (s, e) => { txt.Focus(); txt.SelectAll(); };
+                if (dlg.ShowDialog(this) != DialogResult.OK) return;
+
+                string pattern = txt.Text.Trim();
+                string content = chkText.Checked ? txtContent.Text : null;
+                if (content != null && content.Length == 0) content = null;
+                lastSearchName = pattern;
+                if (chkText.Checked) lastSearchText = txtContent.Text;
+                if (pattern.Length == 0)
+                {
+                    if (content == null) return;
+                    pattern = "*"; // trazi se samo tekst - u svim fajlovima
+                }
+                ShowSearchResults(p, pattern, root, chkSub.Checked, chkCase.Checked, content);
             }
+        }
+
+        private string lastSearchName = "";
+        private string lastSearchText = "";
+        private static Encoding ansiEncoding;
+        private static Encoding GetAnsiEncoding()
+        {
+            if (ansiEncoding == null)
+            {
+                try { Encoding.RegisterProvider(CodePagesEncodingProvider.Instance); ansiEncoding = Encoding.GetEncoding(1250); }
+                catch { ansiEncoding = Encoding.Latin1; }
+            }
+            return ansiEncoding;
+        }
+
+        /// <summary>Da li fajl sadrzi tekst. Cita u delovima (radi i za velike fajlove), UTF-8/UTF-16 (BOM) i Windows-1250 (ANSI, č ć š ž đ).</summary>
+        private static bool FileContainsText(string path, string text, bool caseSensitive, CancellationToken token)
+        {
+            if (ScanFileForText(path, text, caseSensitive, new UTF8Encoding(false), token)) return true;
+            // ANSI fajlovi: ASCII tekst se nalazi vec kroz UTF-8, drugi prolaz treba samo za nasa slova
+            if (text.Any(c => c > 127) && !token.IsCancellationRequested && ScanFileForText(path, text, caseSensitive, GetAnsiEncoding(), token)) return true;
+            return false;
+        }
+        private static bool ScanFileForText(string path, string text, bool caseSensitive, Encoding enc, CancellationToken token)
+        {
+            var comp = caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+            try
+            {
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16, FileOptions.SequentialScan))
+                using (var sr = new StreamReader(fs, enc, true, 1 << 16))
+                {
+                    var buf = new char[1 << 16]; string carry = ""; int n;
+                    while ((n = sr.Read(buf, 0, buf.Length)) > 0)
+                    {
+                        if (token.IsCancellationRequested) return false;
+                        string chunk = carry + new string(buf, 0, n);
+                        if (chunk.IndexOf(text, comp) >= 0) return true;
+                        // kraj dela se prenosi u sledeci da se ne promasi tekst koji je presecen na granici
+                        int keep = Math.Min(text.Length - 1, chunk.Length);
+                        carry = keep > 0 ? chunk.Substring(chunk.Length - keep) : "";
+                    }
+                }
+            }
+            catch { } // zakljucan fajl / nema prava - preskace se
+            return false;
         }
         private static bool IsSearchMatch(string fileName, string pattern, bool caseSensitive)
         {
@@ -2300,14 +2365,15 @@ namespace MiniTC
             }
             catch { return false; }
         }
-        private void ShowSearchResults(PanelState tp, string pattern, string root, bool includeSub, bool caseSensitive)
+        private void ShowSearchResults(PanelState tp, string pattern, string root, bool includeSub, bool caseSensitive, string contentText = null)
         {
-            Form resForm = new Form() { Width = 900, Height = 600, Text = "Rezultati pretrage za '" + pattern + "' u " + root + " - DblClick/Enter locira fajl", StartPosition = FormStartPosition.CenterParent, WindowState = FormWindowState.Maximized, MinimizeBox = false, MaximizeBox = true, ShowInTaskbar = false };
+            string what = "'" + pattern + "'" + (contentText != null ? " sa tekstom '" + contentText + "'" : "");
+            Form resForm = new Form() { Width = 900, Height = 600, Text = "Rezultati pretrage za " + what + " u " + root + " - DblClick/Enter locira fajl", StartPosition = FormStartPosition.CenterParent, WindowState = FormWindowState.Maximized, MinimizeBox = false, MaximizeBox = true, ShowInTaskbar = false };
             ListView lv = new ListView() { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, HideSelection = false, MultiSelect = false, BackColor = ColorBg, ForeColor = ColorFg, Font = listFont };
             lv.Columns.Add("Ime", 250); lv.Columns.Add("Putanja", 400); lv.Columns.Add("Velicina", 80); lv.Columns.Add("Datum", 130);
             Action fitColumns = () => { int w = lv.ClientSize.Width - SystemInformation.VerticalScrollBarWidth; if (w <= 0) return; int c0 = (int)(w * 0.25); int c1 = (int)(w * 0.50); int c2 = (int)(w * 0.10); lv.Columns[0].Width = c0; lv.Columns[1].Width = c1; lv.Columns[2].Width = c2; lv.Columns[3].Width = w - c0 - c1 - c2; };
             lv.ClientSizeChanged += (s, e) => fitColumns(); lv.SizeChanged += (s, e) => fitColumns();
-            Label lblStatus = new Label() { Dock = DockStyle.Top, Height = 24, BackColor = ColorToolbarBg, ForeColor = ColorStatusFg, Text = " Pretraga u toku: " + root + " za '" + pattern + "'..." };
+            Label lblStatus = new Label() { Dock = DockStyle.Top, Height = 24, BackColor = ColorToolbarBg, ForeColor = ColorStatusFg, Text = " Pretraga u toku: " + root + " za " + what + "..." };
             Label lblCount = new Label() { Dock = DockStyle.Bottom, Height = 24, BackColor = ColorToolbarBg, ForeColor = ColorStatusFg, Text = " Pronadjeno: 0" };
             Panel bottomPanel = new Panel() { Dock = DockStyle.Bottom, Height = 40, BackColor = ColorToolbarBg };
             Button btnGoto = new Button() { Text = "Idi na fajl (Enter)", Left = 10, Top = 8, Width = 170, BackColor = ColorGotoBtnBg, ForeColor = Color.White };
@@ -2349,6 +2415,7 @@ namespace MiniTC
                     try
                     {
                         var stack = new Stack<string>(); stack.Push(root); int count = 0;
+                        var statusWatch = Stopwatch.StartNew();
                         while (stack.Count > 0 && !token.IsCancellationRequested && count < 1000)
                         {
                             string currentDir = stack.Pop();
@@ -2366,6 +2433,16 @@ namespace MiniTC
                                             else if ((fsi.Attributes & (FileAttributes.Hidden | FileAttributes.ReparsePoint)) == 0) stack.Push(fsi.FullName);
                                         }
                                         if (!IsSearchMatch(fsi.Name, pattern, caseSensitive)) continue;
+                                        if (contentText != null)
+                                        {
+                                            if (isDir) continue; // tekst se trazi samo u fajlovima
+                                            if (statusWatch.ElapsedMilliseconds > 200)
+                                            {
+                                                statusWatch.Restart(); string cf = fsi.FullName; int cc = count;
+                                                ui(() => { lblStatus.Text = " Pretrazujem tekst: " + cf + " | nadjeno: " + cc; });
+                                            }
+                                            if (!FileContainsText(fsi.FullName, contentText, caseSensitive, token)) continue;
+                                        }
                                         lock (foundFiles) foundFiles.Add(fsi.FullName);
                                         count++;
                                         string full = fsi.FullName, nm = fsi.Name; DateTime lw = fsi.LastWriteTime; long size = isDir ? 0 : ((FileInfo)fsi).Length; int cnt = count;
@@ -2377,7 +2454,7 @@ namespace MiniTC
                             }
                             catch { }
                         }
-                        ui(() => { int total; lock (foundFiles) { total = foundFiles.Count; } lblStatus.Text = " Pretraga zavrsena u " + root + " | ukupno: " + total + " rezultata za '" + pattern + "' (Esc za zatvaranje, Enter/DblClick za lociranje)"; lblCount.Text = " Pronadjeno: " + total + (total >= 1000 ? " (limit 1000)" : "") + " | DblClick ili Enter locira fajl u panelu"; if (lv.Items.Count > 0) { lv.Items[0].Selected = true; lv.Items[0].Focused = true; lv.Focus(); } });
+                        ui(() => { int total; lock (foundFiles) { total = foundFiles.Count; } lblStatus.Text = " Pretraga zavrsena u " + root + " | ukupno: " + total + " rezultata za " + what + " (Esc za zatvaranje, Enter/DblClick za lociranje)"; lblCount.Text = " Pronadjeno: " + total + (total >= 1000 ? " (limit 1000)" : "") + " | DblClick ili Enter locira fajl u panelu"; if (lv.Items.Count > 0) { lv.Items[0].Selected = true; lv.Items[0].Focused = true; lv.Focus(); } });
                     }
                     catch (Exception ex) { string msg = ex.Message; ui(() => { lblStatus.Text = " Greska: " + msg; }); }
                 });
