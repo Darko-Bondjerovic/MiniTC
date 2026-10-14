@@ -898,6 +898,7 @@ namespace MiniTC
             {
                 case Keys.F3: RunCompareTool(); return true;
                 case Keys.F4: OpenInNotepad(); return true;
+                case Keys.Shift | Keys.F4: CreateNewTextFile(); return true;
                 case Keys.F5: StartTransfer(false); return true;
                 case Keys.F6: StartTransfer(true); return true;
                 case Keys.Shift | Keys.F6: RenameSelected(); return true;
@@ -1537,8 +1538,66 @@ namespace MiniTC
         }
         private void OpenInNotepad()
         {
-            var fi = SelectedItem(Active); if (fi == null || fi.IsDir) return;
-            try { Process.Start("notepad.exe", "\"" + fi.FullPath + "\""); } catch (Exception ex) { Status(" Notepad greska: " + ex.Message); }
+            var p = Active;
+            var fi = SelectedItem(p);
+            try
+            {
+                if (fi != null && !fi.IsUp && !fi.IsDir)
+                    // kursor je na fajlu - otvori taj fajl
+                    Process.Start(new ProcessStartInfo("notepad.exe", "\"" + fi.FullPath + "\"") { UseShellExecute = true, WorkingDirectory = p.Current });
+                else
+                    // nema fajla (folder, [..], prazan panel) - otvori prazan Notepad
+                    Process.Start(new ProcessStartInfo("notepad.exe") { UseShellExecute = true, WorkingDirectory = p.Current });
+            }
+            catch (Exception ex) { Status(" Notepad greska: " + ex.Message); }
+        }
+
+        private void CreateNewTextFile()
+        {
+            var p = Active;
+            if (string.IsNullOrEmpty(p.Current)) return;
+            string name = ShowNewFileDialog(p.Current);
+            if (string.IsNullOrWhiteSpace(name)) return;
+
+            if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            { MessageBox.Show(this, "Ime sadrzi nedozvoljene karaktere: \\ / : * ? \" < > |", "Shift+F4"); return; }
+            if (Path.GetFileNameWithoutExtension(name).Length == 0)
+            { MessageBox.Show(this, "Upisi ime fajla ispred ekstenzije.", "Shift+F4"); return; }
+
+            string full = Path.Combine(p.Current, name);
+            if (Directory.Exists(full))
+            { MessageBox.Show(this, "Vec postoji FOLDER sa tim imenom:\n" + full, "Shift+F4"); return; }
+
+            try
+            {
+                bool existed = File.Exists(full);
+                if (!existed)
+                    using (new FileStream(full, FileMode.CreateNew, FileAccess.Write)) { } // prazan fajl
+
+                LoadPanel(p, p.Current, full, true, true, true);           // osvezi i stavi kursor na novi fajl
+                if (SameFolder(Other.Current, p.Current)) RefreshPanel(Other, true);
+                Status(existed ? " Fajl vec postoji - otvaram postojeci: " + full : " Napravljen: " + full);
+
+                Process.Start(new ProcessStartInfo("notepad.exe", "\"" + full + "\"") { UseShellExecute = true, WorkingDirectory = p.Current });
+            }
+            catch (Exception ex) { MessageBox.Show(this, "Ne mogu da napravim fajl:\n" + FriendlyError(ex), "Shift+F4"); }
+        }
+
+        private string ShowNewFileDialog(string folder)
+        {
+            using (var f = new Form { Width = 520, Height = 150, FormBorderStyle = FormBorderStyle.FixedDialog, Text = "Shift+F4 Novi fajl", StartPosition = FormStartPosition.CenterParent, MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false })
+            {
+                var lbl = new Label { Left = 10, Top = 10, Width = 480, AutoEllipsis = true, Text = "Ime novog fajla u: " + folder };
+                var txt = new TextBox { Left = 10, Top = 35, Width = 480, Text = ".txt" };
+                var ok = new Button { Text = "Ok", Left = 310, Width = 85, Top = 70, DialogResult = DialogResult.OK };
+                var cancel = new Button { Text = "Otkazi", Left = 405, Width = 85, Top = 70, DialogResult = DialogResult.Cancel };
+                f.Controls.AddRange(new Control[] { lbl, txt, ok, cancel });
+                f.AcceptButton = ok; f.CancelButton = cancel;
+                DarkTheme.Apply(f);
+                // kursor na pocetak, ispred ".txt" - kucas ime, a ekstenziju mozes da izmenis
+                f.Shown += (s, e) => { txt.Focus(); txt.SelectionStart = 0; txt.SelectionLength = 0; };
+                return f.ShowDialog(this) == DialogResult.OK ? txt.Text.Trim() : "";
+            }
         }
 
         private static List<string> GetOperationItems(PanelState p)
